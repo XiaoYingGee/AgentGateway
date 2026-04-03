@@ -5,13 +5,15 @@ compatibility_date = "2024-01-01"
 # KV namespace for rate limiting
 [[kv_namespaces]]
 binding = "RATE_LIMIT_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
-preview_id = "REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID"
+id = "0c26c5d748f843eaa87ec150db55db75"
 
-# Environment variables — set via `wrangler secret put <NAME>`
-# DISCORD_PUBLIC_KEY   - Ed25519 public key for webhook signature verification
+# Non-sensitive environment variables
+[vars]
+DISCORD_PUBLIC_KEY = "fbfd3b67002702bc67fd1c9c6172aaf72c610b0c4468a175d6ece25857768859"
+DISCORD_APP_ID = "1489503541071712296"
+ALLOWED_USERS = "1489456335618572378"
+
+# Sensitive variables — set via `wrangler secret put <NAME>`
 # DISCORD_BOT_TOKEN    - Bot token for REST API callbacks
-# DISCORD_APP_ID       - Discord application ID
-# ALLOWED_USERS        - Comma-separated Discord user IDs
 # AGENT_HMAC_SECRET    - Shared HMAC signing secret with agent service
-# AGENT_ENDPOINT       - Agent service URL (e.g. CF Tunnel address)
+# AGENT_ENDPOINT       - Agent service URL (CF Tunnel address)
