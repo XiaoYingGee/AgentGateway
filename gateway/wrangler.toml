@@ -1,0 +1,17 @@
+name = "agent-gateway"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+# KV namespace for rate limiting
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+preview_id = "REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID"
+
+# Environment variables — set via `wrangler secret put <NAME>`
+# DISCORD_PUBLIC_KEY   - Ed25519 public key for webhook signature verification
+# DISCORD_BOT_TOKEN    - Bot token for REST API callbacks
+# DISCORD_APP_ID       - Discord application ID
+# ALLOWED_USERS        - Comma-separated Discord user IDs
+# AGENT_HMAC_SECRET    - Shared HMAC signing secret with agent service
+# AGENT_ENDPOINT       - Agent service URL (e.g. CF Tunnel address)
