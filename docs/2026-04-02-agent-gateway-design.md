@@ -1,7 +1,8 @@
 # AgentGateway 设计文档
 
 > 日期: 2026-04-02
-> 状态: 已确认，待实施
+> 最后更新: 2026-04-06
+> 状态: 端到端验证通过
 
 ## 概述
 
@@ -60,7 +61,7 @@ Discord API
 
 | 约束 | 实现 |
 |------|------|
-| 仅本地监听 | `127.0.0.1:7860` |
+| 仅本地监听 | `127.0.0.1:8860` |
 | 请求签名 | HMAC-SHA256 + 时间戳（>5 分钟拒绝） |
 | 工作目录限制 | `allowedPaths` 白名单（`~/Workspace/*`） |
 | 敏感路径拦截 | 黑名单：`~/.ssh`, `~/.aws`, `~/.claude`, `~/.env` 等 |
@@ -102,14 +103,18 @@ Discord API
 ## 本地 Agent 服务
 
 ### 技术选型
-- Node.js + Hono + Claude Code SDK (`@anthropic-ai/claude-code`)
+- Node.js + Hono + `claude` CLI（通过 `child_process.execFile` 调用全局安装的 claude CLI）
+- 注意：`@anthropic-ai/claude-code` npm 包 v2 已移除嵌入式 SDK，不再提供 `query()` API
 
 ### 模块设计
 
 **请求验证层**
 - 验证 HMAC-SHA256 签名（共享密钥）
 - 验证时间戳（拒绝 >5 分钟的请求）
-- 仅监听 `127.0.0.1:7860`
+- 严格类型校验（`validateRequest()`）：required 字段必须是非空字符串
+- `interactionToken` 为必填字段（确保回调可达）
+- agent name 大小写归一化（`toLowerCase()`）
+- 仅监听 `127.0.0.1:8860`
 
 **会话管理器**
 - `Map<threadId, ClaudeSession>` 内存维护活跃会话
@@ -127,12 +132,12 @@ interface AgentAdapter {
 ```
 
 首期只实现 `claude-code` 适配器：
-- 通过 `@anthropic-ai/claude-code` SDK 调用
+- 通过 `child_process.execFile` 调用 `claude` CLI（`claude -p <prompt> --output-format json`）
 - 传入 `cwd`（工作目录，受白名单限制）
-- 流式输出累积后通过 Discord REST API 更新消息
+- 结果通过 Discord REST API 更新 deferred 消息
 
 **响应回调**
-- 通过 Discord Bot Token + REST API 编辑 deferred 消息
+- 通过 interaction token + REST API 编辑 deferred 消息（不需要 Bot Authorization）
 - 长输出分段（≤1900 字符/段）
 - 代码块自动 markdown 格式化
 - 超长输出截断 + 提示
@@ -180,16 +185,24 @@ interface AgentAdapter {
 2. 运行 `register-commands.ts` 注册 `/claude` slash command
 3. `wrangler deploy` 部署 CF Worker
 4. 在 Discord App 设置中填入 Worker URL 作为 Interactions Endpoint
-5. 本地安装 `cloudflared`，创建 Tunnel 指向 `127.0.0.1:7860`
+5. 本地安装 `cloudflared`，创建 Tunnel 指向 `127.0.0.1:8860`
+6. 配置 `.env` 中的代理地址（如需翻墙访问 Discord API）
 
 ### 日常运行
 ```bash
-# 终端 1：启动 Agent 服务
-cd ~/Workspace/AgentGateway/agent-service && npm start
+# 终端 1：启动 Agent 服务（.env 中需配置 HTTPS_PROXY）
+cd ~/Workspace/AgentGateway/agent-service && npx tsx src/index.ts
 
-# 终端 2：启动 Tunnel（或配置为 launchd 开机自启）
-cloudflared tunnel run agent-gateway
+# 终端 2：启动 Tunnel
+cloudflared tunnel --config ~/.cloudflared/config-agent-gateway.yml run agent-gateway
+
+# 优雅关闭 Agent 服务
+curl http://127.0.0.1:8860/shutdown
 ```
+
+> **注意**：在中国大陆网络环境下，agent-service 需要出站代理才能访问 Discord API。
+> 在 `.env` 中配置 `HTTPS_PROXY=http://127.0.0.1:7897`（或你的代理地址）。
+> 详见 [调试日志 #9](2026-04-04-debugging-log.md)。
 
 ## 首期不做（YAGNI）
 
