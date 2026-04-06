@@ -12,20 +12,21 @@ export async function editDeferredResponse(
   appId: string,
   token: string,
   content: string,
-  botToken: string,
+  _botToken?: string,
 ): Promise<void> {
   const segments = splitMessage(content);
   const [first, ...rest] = segments;
 
   if (!first) return;
 
-  // Edit the deferred placeholder with the first segment
+  // Edit the deferred placeholder with the first segment.
+  // Interaction webhook endpoints are authenticated by the interaction token
+  // in the URL path — no Authorization header is needed.
   const editUrl = `${DISCORD_API}/webhooks/${appId}/${token}/messages/@original`;
   const editRes = await fetch(editUrl, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bot ${botToken}`,
     },
     body: JSON.stringify({ content: first }),
   });
@@ -39,7 +40,7 @@ export async function editDeferredResponse(
 
   // Send remaining segments as follow-ups
   for (const segment of rest) {
-    await sendFollowUp(appId, token, segment, botToken);
+    await sendFollowUp(appId, token, segment);
   }
 }
 
@@ -50,14 +51,13 @@ export async function sendFollowUp(
   appId: string,
   token: string,
   content: string,
-  botToken: string,
+  _botToken?: string,
 ): Promise<void> {
   const url = `${DISCORD_API}/webhooks/${appId}/${token}`;
   const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bot ${botToken}`,
     },
     body: JSON.stringify({ content }),
   });

@@ -44,8 +44,8 @@ export async function verifyRequest(
  */
 export function verifyMiddleware(secret: string) {
   return async (c: Context, next: Next) => {
-    // Allow health checks without auth
-    if (c.req.path === "/health") {
+    // Allow health/shutdown without auth (localhost-only endpoints)
+    if (c.req.path === "/health" || c.req.path === "/shutdown") {
       await next();
       return;
     }

@@ -1,5 +1,22 @@
+import "dotenv/config.js";
+
+// Global outbound proxy (e.g. for Discord API calls)
+const PROXY_URL = process.env["HTTPS_PROXY"] || process.env["HTTP_PROXY"];
+if (PROXY_URL) {
+  import("undici").then(({ ProxyAgent, setGlobalDispatcher }) => {
+    setGlobalDispatcher(new ProxyAgent(PROXY_URL));
+    console.log(`[agent-service] Global proxy set: ${PROXY_URL}`);
+  });
+}
+
+// Ensure Node.js is in PATH for Claude Code SDK to spawn processes
+import { dirname } from "node:path";
+const nodeDir = dirname(process.execPath); // e.g., C:\Program Files\nodejs
+if (!process.env.PATH?.includes(nodeDir)) {
+  process.env.PATH = nodeDir + (process.env.PATH ? ";" + process.env.PATH : "");
+}
+
 import { homedir } from "node:os";
-import { resolve } from "node:path";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import type { Server } from "node:http";
@@ -9,7 +26,7 @@ import { verifyMiddleware } from "./verify.js";
 import { SessionManager } from "./session.js";
 import { editDeferredResponse } from "./discord.js";
 import { AdapterRegistry } from "./adapters/base.js";
-import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
+import { ClaudeCodeAdapter, validateCwd } from "./adapters/claude-code.js";
 
 // ---------------------------------------------------------------------------
 // Configuration (environment variables)
@@ -17,9 +34,10 @@ import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
 
 const HMAC_SECRET = requireEnv("AGENT_HMAC_SECRET");
 const DISCORD_APP_ID = requireEnv("DISCORD_APP_ID");
-const DISCORD_BOT_TOKEN = requireEnv("DISCORD_BOT_TOKEN");
+// DISCORD_BOT_TOKEN is no longer required — interaction webhooks are
+// authenticated by the interaction token in the URL path.
 
-const DEFAULT_CWD = process.env["DEFAULT_CWD"] ?? resolve(homedir(), "Workspace");
+const DEFAULT_CWD = process.env["DEFAULT_CWD"] ?? "D:\\Workspace";
 const MAX_SESSIONS = parseInt(process.env["MAX_SESSIONS"] ?? "5", 10);
 const SESSION_TIMEOUT_MS = parseInt(
   process.env["SESSION_TIMEOUT_MS"] ?? String(30 * 60 * 1000),
@@ -27,7 +45,7 @@ const SESSION_TIMEOUT_MS = parseInt(
 );
 
 const HOST = "127.0.0.1";
-const PORT = 7860;
+const PORT = 8860;
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -69,23 +87,31 @@ app.get("/health", (c) => {
 app.post("/invoke", async (c) => {
   try {
     const rawBody = c.get("rawBody");
-    const req: AgentRequest = JSON.parse(rawBody);
+    const parsed = JSON.parse(rawBody);
 
-    // Validate required fields
-    if (!req.prompt || !req.threadId || !req.agentName) {
-      return c.json({ error: "Missing required fields" }, 400);
+    // Strict type + field validation
+    const check = validateRequest(parsed);
+    if (!check.valid) {
+      return c.json({ error: check.error }, 400);
     }
+    const req = check.data;
 
-    // Look up adapter
-    const adapter = registry.get(req.agentName);
+    // Normalise agent name to lowercase for lookup
+    const adapter = registry.get(req.agentName.toLowerCase());
     if (!adapter) {
       return c.json({ error: `Unknown agent: ${req.agentName}` }, 400);
+    }
+
+    // Early cwd validation (expand ~ before checking)
+    const cwd = (req.cwd ?? DEFAULT_CWD).replace(/^~(?=[/\\]|$)/, homedir());
+    if (!validateCwd(cwd)) {
+      return c.json({ error: `Working directory not allowed: ${req.cwd ?? DEFAULT_CWD}` }, 403);
     }
 
     // Get or create session (may throw if at capacity)
     let session;
     try {
-      session = sessionManager.getOrCreate(req.threadId, req.cwd ?? DEFAULT_CWD);
+      session = sessionManager.getOrCreate(req.threadId, cwd);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Session limit reached";
       return c.json({ error: message }, 429);
@@ -119,18 +145,20 @@ async function processInBackground(
   session: SessionContext,
 ): Promise<void> {
   try {
+    console.log(`[process] invoking adapter for prompt: "${req.prompt.slice(0, 60)}..."`);
     const result = await adapter.invoke(req.prompt, session);
+    console.log(`[process] adapter returned ${result.length} chars`);
 
     await editDeferredResponse(
       DISCORD_APP_ID,
       req.interactionToken,
       result,
-      DISCORD_BOT_TOKEN,
     );
+    console.log(`[process] Discord response sent`);
   } catch (err) {
     const errorMessage =
       err instanceof Error ? err.message : "Unknown error";
-    console.error(`[process] ${errorMessage}`);
+    console.error(`[process] adapter/discord error: ${errorMessage}`);
 
     // Best-effort: inform the user via Discord that something went wrong
     try {
@@ -138,10 +166,10 @@ async function processInBackground(
         DISCORD_APP_ID,
         req.interactionToken,
         `Error: ${errorMessage}`,
-        DISCORD_BOT_TOKEN,
       );
     } catch (discordErr) {
-      console.error(`[process] Failed to send error to Discord: ${discordErr}`);
+      const msg = discordErr instanceof Error ? discordErr.message : String(discordErr);
+      console.error(`[process] Discord callback also failed: ${msg}`);
     }
   }
 }
@@ -151,6 +179,7 @@ async function processInBackground(
 // ---------------------------------------------------------------------------
 
 let server: Server | null = null;
+let isShuttingDown = false;
 
 function startServer(): void {
   server = serve(
@@ -161,32 +190,54 @@ function startServer(): void {
     },
     (info) => {
       console.log(`[agent-service] Listening on http://${HOST}:${info.port}`);
+      console.log(`[agent-service] Stop: curl http://${HOST}:${info.port}/shutdown`);
     },
   ) as Server;
+
+  // Reduce keep-alive timeout so idle connections don't block shutdown
+  server.keepAliveTimeout = 5_000;
 }
 
 function shutdown(): void {
+  if (isShuttingDown) return; // prevent re-entry
+  isShuttingDown = true;
+
   console.log("[agent-service] Shutting down...");
   sessionManager.shutdown();
 
   if (server) {
+    // Stop accepting new connections
     server.close(() => {
       console.log("[agent-service] Server closed.");
       process.exit(0);
     });
 
-    // Force-exit after 10 s if connections linger
+    // Force-close existing connections (Node 18.2+)
+    if (typeof server.closeAllConnections === "function") {
+      server.closeAllConnections();
+    }
+
+    // Force-exit after 3s if something still hangs
     setTimeout(() => {
-      console.warn("[agent-service] Forcing exit after timeout.");
+      console.warn("[agent-service] Forcing exit.");
       process.exit(1);
-    }, 10_000).unref();
+    }, 3_000).unref();
   } else {
     process.exit(0);
   }
 }
 
+// Standard signal handlers
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
+
+// Graceful shutdown endpoint (useful on Windows where signals are unreliable)
+app.get("/shutdown", (c) => {
+  console.log("[agent-service] Shutdown requested via HTTP");
+  // Respond first, then shut down
+  setTimeout(shutdown, 100);
+  return c.text("Shutting down...");
+});
 
 startServer();
 
@@ -201,4 +252,49 @@ function requireEnv(name: string): string {
     process.exit(1);
   }
   return value;
+}
+
+/**
+ * Validate and coerce the raw parsed JSON into a typed AgentRequest.
+ * Returns an error string if validation fails.
+ */
+export function validateRequest(
+  raw: unknown,
+): { valid: true; data: AgentRequest } | { valid: false; error: string } {
+  if (raw === null || typeof raw !== "object") {
+    return { valid: false, error: "Request body must be a JSON object" };
+  }
+
+  const obj = raw as Record<string, unknown>;
+
+  // Required string fields
+  const required: (keyof AgentRequest)[] = ["prompt", "threadId", "agentName", "interactionToken"];
+  for (const field of required) {
+    const val = obj[field];
+    if (typeof val !== "string" || val.length === 0) {
+      return { valid: false, error: `Missing or invalid required field: ${field}` };
+    }
+  }
+
+  // Optional string fields — must be string if present and non-null
+  const optional: (keyof AgentRequest)[] = ["userId", "channelId", "cwd"];
+  for (const field of optional) {
+    const val = obj[field];
+    if (val !== undefined && val !== null && typeof val !== "string") {
+      return { valid: false, error: `Field ${field} must be a string` };
+    }
+  }
+
+  return {
+    valid: true,
+    data: {
+      prompt: obj.prompt as string,
+      threadId: obj.threadId as string,
+      agentName: obj.agentName as string,
+      interactionToken: obj.interactionToken as string,
+      userId: (obj.userId as string) ?? "",
+      channelId: (obj.channelId as string) ?? "",
+      cwd: (obj.cwd as string | undefined),
+    },
+  };
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { validateCwd } from "../src/adapters/claude-code";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 
 const HOME = homedir();
 
@@ -50,8 +50,30 @@ describe("validateCwd", () => {
     expect(validateCwd(resolve(HOME, "Workspace/../.ssh"))).toBe(false);
   });
 
+  it("expands ~ prefix and blocks ~/.ssh", () => {
+    expect(validateCwd("~/.ssh")).toBe(false);
+    expect(validateCwd("~/.ssh/keys")).toBe(false);
+  });
+
+  it("expands ~ prefix and blocks ~/.aws", () => {
+    expect(validateCwd("~/.aws")).toBe(false);
+  });
+
+  it("expands ~ prefix and allows ~/Workspace", () => {
+    expect(validateCwd("~/Workspace")).toBe(true);
+    expect(validateCwd("~/Workspace/my-project")).toBe(true);
+  });
+
+  it("expands bare ~ to home directory", () => {
+    expect(validateCwd("~")).toBe(true);
+  });
+
   it("allows custom allowedPaths", () => {
-    expect(validateCwd("/opt/projects/foo", ["/opt/projects"])).toBe(true);
-    expect(validateCwd("/tmp/bad", ["/opt/projects"])).toBe(false);
+    // Use platform-aware absolute paths so the test works on both Unix and Windows
+    const base = resolve(HOME, "custom-projects");
+    const sub = resolve(base, "foo");
+    const outside = resolve(HOME, "other-place");
+    expect(validateCwd(sub, [base])).toBe(true);
+    expect(validateCwd(outside, [base])).toBe(false);
   });
 });
