@@ -44,14 +44,36 @@ else
 fi
 
 if command -v claude &>/dev/null; then
-  ok "Claude Code CLI"
+  ok "Claude Code CLI ($(which claude))"
 else
-  # Check Windows WinGet path
-  CLAUDE_WIN="$HOME/AppData/Local/Microsoft/WinGet/Packages/Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe/claude.exe"
-  if [ -f "$CLAUDE_WIN" ]; then
-    ok "Claude Code CLI (WinGet)"
+  # Check platform-specific paths
+  CLAUDE_FOUND=0
+  if [ "$(uname -s)" = "Darwin" ]; then
+    for p in /usr/local/bin/claude /opt/homebrew/bin/claude "$HOME/.local/bin/claude"; do
+      if [ -f "$p" ]; then
+        ok "Claude Code CLI ($p)"
+        CLAUDE_FOUND=1
+        break
+      fi
+    done
+  elif [ "$OS" = "Windows_NT" ] || uname -s | grep -qi mingw; then
+    CLAUDE_WIN="$HOME/AppData/Local/Microsoft/WinGet/Packages/Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe/claude.exe"
+    if [ -f "$CLAUDE_WIN" ]; then
+      ok "Claude Code CLI (WinGet)"
+      CLAUDE_FOUND=1
+    fi
   else
-    warn "Claude Code CLI not found — needed for agent-service (npm install -g @anthropic-ai/claude-code)"
+    for p in /usr/local/bin/claude "$HOME/.local/bin/claude"; do
+      if [ -f "$p" ]; then
+        ok "Claude Code CLI ($p)"
+        CLAUDE_FOUND=1
+        break
+      fi
+    done
+  fi
+
+  if [ "$CLAUDE_FOUND" -eq 0 ]; then
+    warn "Claude Code CLI not found — install: npm install -g @anthropic-ai/claude-code"
   fi
 fi
 

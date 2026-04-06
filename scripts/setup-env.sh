@@ -52,8 +52,9 @@ echo "Leave blank if not needed."
 read -rp "HTTPS_PROXY (e.g. http://127.0.0.1:7897): " PROXY
 
 # Default CWD
-read -rp "DEFAULT_CWD (default: D:\\Workspace): " CWD
-CWD="${CWD:-D:\\Workspace}"
+DEFAULT_WORKSPACE="$HOME/Workspace"
+read -rp "DEFAULT_CWD (default: $DEFAULT_WORKSPACE): " CWD
+CWD="${CWD:-$DEFAULT_WORKSPACE}"
 
 # ---- Write .env --------------------------------------------------------------
 
@@ -64,7 +65,7 @@ CWD="${CWD:-D:\\Workspace}"
     echo "HTTPS_PROXY=$PROXY"
     echo "HTTP_PROXY=$PROXY"
   fi
-  if [ "$CWD" != 'D:\Workspace' ]; then
+  if [ "$CWD" != "$DEFAULT_WORKSPACE" ]; then
     echo "DEFAULT_CWD=$CWD"
   fi
 } > "$ENV_FILE"

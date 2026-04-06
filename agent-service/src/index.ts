@@ -10,10 +10,10 @@ if (PROXY_URL) {
 }
 
 // Ensure Node.js is in PATH for Claude Code SDK to spawn processes
-import { dirname } from "node:path";
-const nodeDir = dirname(process.execPath); // e.g., C:\Program Files\nodejs
+import { dirname, delimiter, resolve } from "node:path";
+const nodeDir = dirname(process.execPath);
 if (!process.env.PATH?.includes(nodeDir)) {
-  process.env.PATH = nodeDir + (process.env.PATH ? ";" + process.env.PATH : "");
+  process.env.PATH = nodeDir + (process.env.PATH ? delimiter + process.env.PATH : "");
 }
 
 import { homedir } from "node:os";
@@ -37,7 +37,7 @@ const DISCORD_APP_ID = requireEnv("DISCORD_APP_ID");
 // DISCORD_BOT_TOKEN is no longer required — interaction webhooks are
 // authenticated by the interaction token in the URL path.
 
-const DEFAULT_CWD = process.env["DEFAULT_CWD"] ?? "D:\\Workspace";
+const DEFAULT_CWD = process.env["DEFAULT_CWD"] ?? resolve(homedir(), "Workspace");
 const MAX_SESSIONS = parseInt(process.env["MAX_SESSIONS"] ?? "5", 10);
 const SESSION_TIMEOUT_MS = parseInt(
   process.env["SESSION_TIMEOUT_MS"] ?? String(30 * 60 * 1000),

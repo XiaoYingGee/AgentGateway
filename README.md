@@ -37,8 +37,8 @@ AgentGateway/
 | Tool | Purpose |
 |------|---------|
 | Node.js 18+ | Agent service runtime |
-| [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) | Tunnel connector |
-| [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) | AI agent backend |
+| [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) | Tunnel connector (`brew install cloudflared` / `apt install cloudflared` / [Windows download](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)) |
+| [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) | AI agent backend (`npm install -g @anthropic-ai/claude-code`) |
 | Cloudflare account | Worker + Tunnel hosting |
 | Discord application | Bot + slash commands |
 
@@ -231,7 +231,7 @@ cd gateway && npm test
 
 ### Path Security
 
-- **Allowed:** `~/Workspace`, `D:\Workspace` (configurable)
+- **Allowed:** `~/Workspace` (configurable via `DEFAULT_CWD`)
 - **Blocked:** `~/.ssh`, `~/.aws`, `~/.claude`, `~/.gnupg`, `~/.config/gh`, `.env*`
 - Path traversal (`../../`) is normalized before validation
 - `~` is expanded to the real home directory
@@ -244,7 +244,7 @@ cd gateway && npm test
 |----------|----------|---------|-------------|
 | `AGENT_HMAC_SECRET` | Yes | - | Shared HMAC signing key |
 | `DISCORD_APP_ID` | Yes | - | Discord Application ID |
-| `DEFAULT_CWD` | No | `D:\Workspace` | Default working directory |
+| `DEFAULT_CWD` | No | `~/Workspace` | Default working directory |
 | `MAX_SESSIONS` | No | `5` | Max concurrent sessions |
 | `SESSION_TIMEOUT_MS` | No | `1800000` (30min) | Session idle timeout |
 | `HTTPS_PROXY` | No | - | Outbound HTTP proxy |

@@ -13,7 +13,6 @@ const HOME = homedir();
 const DEFAULT_ALLOWED_PATHS: string[] = [
   HOME,
   resolve(HOME, "Workspace"),
-  "D:\\Workspace",
 ];
 
 const BLOCKED_PATHS: string[] = [
@@ -68,22 +67,35 @@ const INVOKE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
  * Find the `claude` CLI executable path.
- * On Windows, prefer the .exe from WinGet; otherwise fall back to "claude".
+ * Checks platform-specific installation locations, falls back to "claude" on PATH.
  */
 function findClaudeCli(): string {
+  const home = homedir();
+  const candidates: string[] = [];
+
   if (process.platform === "win32") {
-    const home = homedir();
-    const candidates = [
+    candidates.push(
       resolve(home, "AppData/Local/Microsoft/WinGet/Packages/Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe/claude.exe"),
       resolve(home, "AppData/Roaming/npm/claude.cmd"),
-    ];
-    for (const p of candidates) {
-      if (existsSync(p)) {
-        console.log(`[claude-code] found CLI at: ${p}`);
-        return p;
-      }
+    );
+  } else {
+    candidates.push(
+      "/usr/local/bin/claude",
+      resolve(home, ".local/bin/claude"),
+      resolve(home, ".npm-global/bin/claude"),
+    );
+    if (process.platform === "darwin") {
+      candidates.push("/opt/homebrew/bin/claude");
     }
   }
+
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      console.log(`[claude-code] found CLI at: ${p}`);
+      return p;
+    }
+  }
+  // Rely on PATH resolution
   return "claude";
 }
 
