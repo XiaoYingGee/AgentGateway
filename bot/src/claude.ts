@@ -21,33 +21,36 @@ function findClaude(): string {
 const CLAUDE_CLI = findClaude();
 console.log(`[claude] Using CLI: ${CLAUDE_CLI}`);
 
-export interface HistoryMessage {
-  author: string;
-  content: string;
-  isBot: boolean;
+/**
+ * Per-channel session tracking for --resume based conversation continuity.
+ * Maps channelId → Claude CLI session ID.
+ */
+const channelSessions = new Map<string, string>();
+
+export function getChannelSessionId(channelId: string): string | undefined {
+  return channelSessions.get(channelId);
+}
+
+export function clearChannelSession(channelId: string): void {
+  channelSessions.delete(channelId);
 }
 
 /**
- * Invoke Claude Code CLI with streaming output.
+ * Invoke Claude Code CLI with streaming output and session persistence.
+ * Uses --session-id / --resume for conversation continuity per channel.
  * onUpdate is called with accumulated text as it streams in.
  */
 export async function invokeClaude(
   prompt: string,
-  history: HistoryMessage[],
+  channelId: string,
   cwd: string,
   onUpdate?: (text: string) => void,
 ): Promise<string> {
   return new Promise((resolvePromise, rejectPromise) => {
-    let fullPrompt = prompt;
-    if (history.length > 0) {
-      const ctx = history
-        .map((m) => `[${m.isBot ? "Bot" : "User"} ${m.author}]: ${m.content}`)
-        .join("\n");
-      fullPrompt = `Here is the conversation history in this channel/thread:\n${ctx}\n\nNew request: ${prompt}`;
-    }
+    const existingSessionId = channelSessions.get(channelId);
 
     const args = [
-      "-p", fullPrompt,
+      "-p", prompt,
       "--verbose",
       "--output-format", "stream-json",
       "--max-turns", "30",
@@ -56,7 +59,12 @@ export async function invokeClaude(
       "--permission-mode", "bypassPermissions",
     ];
 
-    console.log(`[claude] Invoking (stream): prompt="${prompt.slice(0, 60)}..." history=${history.length} msgs`);
+    // Resume existing session or start fresh
+    if (existingSessionId) {
+      args.push("--resume", existingSessionId);
+    }
+
+    console.log(`[claude] Invoking: prompt="${prompt.slice(0, 60)}..." session=${existingSessionId ?? "new"} resume=${!!existingSessionId}`);
 
     const child = spawn(CLAUDE_CLI, args, {
       cwd,
@@ -68,6 +76,7 @@ export async function invokeClaude(
     let resultText = "";
     let latestAssistantText = "";
     let buffer = "";
+    let capturedSessionId: string | undefined;
 
     child.stdout.on("data", (chunk: Buffer) => {
       buffer += chunk.toString();
@@ -79,8 +88,12 @@ export async function invokeClaude(
         try {
           const event = JSON.parse(line);
 
+          // Capture session ID
+          if (event.type === "system" && event.session_id) {
+            capturedSessionId = event.session_id;
+          }
+
           if (event.type === "assistant") {
-            // Extract text from content blocks
             const content = event.message?.content;
             if (Array.isArray(content)) {
               const texts = content
@@ -93,6 +106,9 @@ export async function invokeClaude(
             }
           } else if (event.type === "result") {
             resultText = event.result ?? latestAssistantText;
+            if (event.session_id) {
+              capturedSessionId = event.session_id;
+            }
           }
         } catch {
           // Ignore unparseable lines
@@ -106,22 +122,33 @@ export async function invokeClaude(
     });
 
     child.on("close", (code) => {
-      // Process any remaining buffer
+      // Process remaining buffer
       if (buffer.trim()) {
         try {
           const event = JSON.parse(buffer);
           if (event.type === "result") {
             resultText = event.result ?? latestAssistantText;
+            if (event.session_id) {
+              capturedSessionId = event.session_id;
+            }
           }
         } catch { /* ignore */ }
       }
 
       const finalText = resultText || latestAssistantText || "(No response)";
+
       if (code !== 0 && !finalText) {
         rejectPromise(new Error(`Claude exited with code ${code}`));
         return;
       }
-      console.log(`[claude] Done, ${finalText.length} chars, result=${JSON.stringify(resultText.slice(0, 100))}, assistant=${JSON.stringify(latestAssistantText.slice(0, 100))}`);
+
+      // Persist session ID for future --resume calls
+      if (capturedSessionId) {
+        channelSessions.set(channelId, capturedSessionId);
+        console.log(`[claude] Session persisted: channel=${channelId} session=${capturedSessionId}`);
+      }
+
+      console.log(`[claude] Done, ${finalText.length} chars`);
       resolvePromise(finalText);
     });
 

@@ -20,6 +20,8 @@ export interface SessionContext {
   cwd: string;
   lastActivity: number;
   conversationHistory: Array<{ role: string; content: string }>;
+  /** Claude Code CLI session ID for --resume based conversation continuity */
+  claudeSessionId?: string;
 }
 
 /**

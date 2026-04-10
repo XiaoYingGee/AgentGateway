@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, normalize, sep } from "node:path";
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { AgentAdapter, SessionContext } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -24,7 +24,7 @@ const BLOCKED_PATHS: string[] = [
 ];
 
 const BLOCKED_PATTERNS: RegExp[] = [
-  /\.env($|\.)/,  // .env, .env.local, .env.production, etc.
+  /\.env($|\.)/, // .env, .env.local, .env.production, etc.
 ];
 
 /**
@@ -35,24 +35,19 @@ export function validateCwd(
   cwd: string,
   allowedPaths: string[] = DEFAULT_ALLOWED_PATHS,
 ): boolean {
-  // Expand ~ to the real home directory so paths like ~/.ssh are
-  // properly matched against blocked-path rules on all platforms.
   const expanded = cwd.replace(/^~(?=[/\\]|$)/, HOME);
   const normalised = normalize(resolve(expanded));
 
-  // Must be inside at least one allowed path
   const allowed = allowedPaths.some(
     (p) => normalised === normalize(p) || normalised.startsWith(normalize(p) + sep),
   );
   if (!allowed) return false;
 
-  // Must not be inside any blocked path
   const blocked = BLOCKED_PATHS.some(
     (p) => normalised === normalize(p) || normalised.startsWith(normalize(p) + sep),
   );
   if (blocked) return false;
 
-  // Must not match blocked filename patterns
   const blockedByPattern = BLOCKED_PATTERNS.some((re) => re.test(normalised));
   if (blockedByPattern) return false;
 
@@ -60,15 +55,11 @@ export function validateCwd(
 }
 
 // ---------------------------------------------------------------------------
-// Claude Code Adapter (CLI subprocess)
+// Claude Code Adapter (stream-json + session persistence)
 // ---------------------------------------------------------------------------
 
 const INVOKE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
-/**
- * Find the `claude` CLI executable path.
- * Checks platform-specific installation locations, falls back to "claude" on PATH.
- */
 function findClaudeCli(): string {
   const home = homedir();
   const candidates: string[] = [];
@@ -95,11 +86,9 @@ function findClaudeCli(): string {
       return p;
     }
   }
-  // Rely on PATH resolution
   return "claude";
 }
 
-// Resolve once at module load so we don't stat on every invoke
 const CLAUDE_CLI = findClaudeCli();
 
 export class ClaudeCodeAdapter implements AgentAdapter {
@@ -111,74 +100,127 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     }
 
     return new Promise<string>((resolvePromise, rejectPromise) => {
+      const isResume = session.conversationHistory.length > 0 && !!session.claudeSessionId;
+
       const args = [
         "-p", prompt,
-        "--output-format", "json",
+        "--output-format", "stream-json",
         "--max-turns", "30",
         "--allowedTools", "Read,Write,Edit,Bash,Glob,Grep",
         "--permission-mode", "bypassPermissions",
       ];
 
-      console.log(`[claude-code] execFile: ${CLAUDE_CLI} -p "${prompt.slice(0, 60)}..." ...`);
+      // Use session persistence: --session-id for new, --resume for continuing
+      if (isResume) {
+        args.push("--resume", session.claudeSessionId!);
+      } else if (session.claudeSessionId) {
+        args.push("--session-id", session.claudeSessionId);
+      }
 
-      const child = execFile(
-        CLAUDE_CLI,
-        args,
-        {
-          cwd: session.cwd,
-          env: { ...process.env },
-          maxBuffer: 10 * 1024 * 1024, // 10 MB
-          timeout: INVOKE_TIMEOUT_MS,
-        },
-        (err, stdout, stderr) => {
-          if (err) {
-            const errSnippet = (stderr || err.message).slice(-500);
-            console.error(`[claude-code] error: ${errSnippet}`);
-            rejectPromise(new Error(`Claude Code failed: ${errSnippet}`));
-            return;
-          }
+      console.log(`[claude-code] spawn: prompt="${prompt.slice(0, 60)}..." session=${session.claudeSessionId ?? "new"} resume=${isResume}`);
 
+      const child = spawn(CLAUDE_CLI, args, {
+        cwd: session.cwd,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: "cli" },
+      });
+      child.stdin.end();
+
+      let resultText = "";
+      let latestAssistantText = "";
+      let buffer = "";
+      let capturedSessionId: string | undefined;
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
           try {
-            const result = JSON.parse(stdout.trim());
-            let resultText = "";
+            const event = JSON.parse(line);
 
-            if (result.type === "result" && result.result) {
-              resultText = result.result;
-            } else if (result.type === "result" && result.is_error) {
-              resultText = `Error: Claude Code encountered an error (${result.subtype})`;
-            } else {
-              resultText = stdout.trim().slice(0, 1900) || "(No response from Claude Code)";
+            // Capture session ID from init event
+            if (event.type === "system" && event.session_id) {
+              capturedSessionId = event.session_id;
             }
 
-            // Update session bookkeeping
-            session.lastActivity = Date.now();
-            session.conversationHistory.push(
-              { role: "user", content: prompt },
-              { role: "assistant", content: resultText },
-            );
-
-            resolvePromise(resultText);
+            if (event.type === "assistant") {
+              const content = event.message?.content;
+              if (Array.isArray(content)) {
+                const texts = content
+                  .filter((b: { type: string }) => b.type === "text")
+                  .map((b: { text: string }) => b.text);
+                if (texts.length > 0) {
+                  latestAssistantText = texts.join("\n");
+                }
+              }
+            } else if (event.type === "result") {
+              resultText = event.result ?? latestAssistantText;
+              if (event.session_id) {
+                capturedSessionId = event.session_id;
+              }
+            }
           } catch {
-            // If JSON parsing fails, return raw stdout
-            const text = stdout.trim() || "(No response from Claude Code)";
-            session.lastActivity = Date.now();
-            resolvePromise(text.slice(0, 3800));
+            // Ignore unparseable lines
           }
-        },
-      );
+        }
+      });
 
-      // Safety net: kill if still running after timeout (execFile has its own
-      // timeout but this ensures cleanup of the child tree)
+      child.stderr.on("data", (chunk: Buffer) => {
+        const msg = chunk.toString().trim();
+        if (msg) console.error(`[claude-code] stderr: ${msg.slice(-300)}`);
+      });
+
+      child.on("close", (code) => {
+        // Process remaining buffer
+        if (buffer.trim()) {
+          try {
+            const event = JSON.parse(buffer);
+            if (event.type === "result") {
+              resultText = event.result ?? latestAssistantText;
+              if (event.session_id) {
+                capturedSessionId = event.session_id;
+              }
+            }
+          } catch { /* ignore */ }
+        }
+
+        const finalText = resultText || latestAssistantText || "(No response)";
+
+        if (code !== 0 && !finalText) {
+          rejectPromise(new Error(`Claude exited with code ${code}`));
+          return;
+        }
+
+        // Persist session ID for future --resume calls
+        if (capturedSessionId) {
+          session.claudeSessionId = capturedSessionId;
+        }
+
+        // Update session bookkeeping
+        session.lastActivity = Date.now();
+        session.conversationHistory.push(
+          { role: "user", content: prompt },
+          { role: "assistant", content: finalText },
+        );
+
+        console.log(`[claude-code] Done, ${finalText.length} chars, sessionId=${session.claudeSessionId ?? "none"}`);
+        resolvePromise(finalText);
+      });
+
+      // Timeout safety net
       const timer = setTimeout(() => {
         if (child.exitCode === null) {
           child.kill("SIGTERM");
         }
-      }, INVOKE_TIMEOUT_MS + 5000);
+      }, INVOKE_TIMEOUT_MS);
       timer.unref();
     });
   }
 
   destroySession(_sessionId: string): void {
-    // CLI mode is stateless per-call; nothing to tear down.
+    // Session state is managed by Claude CLI's persistence layer.
   }
 }
