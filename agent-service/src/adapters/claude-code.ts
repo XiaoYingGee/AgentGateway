@@ -104,6 +104,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
       const args = [
         "-p", prompt,
+        "--verbose",
         "--output-format", "stream-json",
         "--max-turns", "30",
         "--allowedTools", "Read,Write,Edit,Bash,Glob,Grep",
