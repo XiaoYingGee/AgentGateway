@@ -2,6 +2,7 @@ import type { AIAdapter, IMAdapter, InboundMessage, SendResult } from "./types.j
 import { SessionManager } from "./session.js";
 import { splitMessage } from "../utils/messages.js";
 import { parseAIPrefix } from "../utils/prefix.js";
+import { parseCommand } from "../utils/command.js";
 import { randomUUID } from "node:crypto";
 
 const EDIT_THROTTLE_MS = 1500; // S2: throttle edits
@@ -120,7 +121,20 @@ export class Router {
         return;
       }
 
-      await this.processMessage(msg, im);
+      // Reaction feedback: ⏳ on start
+      const reactTarget = msg.threadId ?? chatId;
+      const reactMsgId = msg.replyToId;
+      if (reactMsgId) {
+        await im.react?.(reactTarget, reactMsgId, "⏳").catch(() => {});
+      }
+
+      const ok = await this.processMessage(msg, im);
+
+      // Reaction feedback: replace ⏳ with ✅ or ❌
+      if (reactMsgId) {
+        await im.unreact?.(reactTarget, reactMsgId, "⏳").catch(() => {});
+        await im.react?.(reactTarget, reactMsgId, ok ? "✅" : "❌").catch(() => {});
+      }
     } catch (err) {
       // M-6: catch mkdirSync and other early failures
       // R7: sanitize error messages — ref id for user, full stack for logs
@@ -135,16 +149,29 @@ export class Router {
     }
   }
 
-  private async processMessage(msg: InboundMessage, im: IMAdapter): Promise<void> {
+  private async processMessage(msg: InboundMessage, im: IMAdapter): Promise<boolean> {
     const { sessionKey, chatId } = msg;
     const session = this.sessions.getOrCreate(sessionKey);
+
+    // Check for /help command before AI routing
+    const command = parseCommand(msg.text);
+    if (command === "help") {
+      await this.handleHelp(msg, im);
+      return true;
+    }
 
     // Resolve which AI to route to (prefix > sticky > default)
     const { alias, prompt, switched } = this.resolveAI(sessionKey, msg.text);
     const aiAdapter = this.aiAdapters.get(alias)!;
 
+    // Also check if the prompt after prefix stripping is /help
+    if (parseCommand(prompt) === "help") {
+      await this.handleHelp(msg, im);
+      return true;
+    }
+
+    let succeeded = true;
     try {
-      // Send switch notice if AI changed
       if (switched) {
         await im.sendMessage({
           chatId,
@@ -261,6 +288,7 @@ export class Router {
         threadId: msg.threadId,
         replyToId: msg.replyToId,
       }).catch(() => {}); // don't let error reporting crash
+      succeeded = false;
     } finally {
       // R1: atomic drain loop — stay busy while queue has messages
       while (true) {
@@ -283,6 +311,32 @@ export class Router {
         }
       }
     }
+    return succeeded;
+  }
+
+  private async handleHelp(msg: InboundMessage, im: IMAdapter): Promise<void> {
+    const aliases = this.getAIAliases();
+    const currentAI = this.sessions.getCurrentAI(msg.sessionKey) ?? this.defaultAlias;
+
+    const lines = [
+      "**AgentGateway Help**",
+      "",
+      `Available AI backends: ${aliases.map(a => a === this.defaultAlias ? `**${a}** (default)` : a).join(", ")}`,
+      "",
+      "**Usage:**",
+      ...aliases.map(a => `  \`/${a} <message>\` — route to ${a}`),
+      "",
+      `Current session AI: **${currentAI}**`,
+      "",
+      "Messages without a prefix are routed to the last-used AI (sticky session).",
+    ];
+
+    await im.sendMessage({
+      chatId: msg.chatId,
+      text: lines.join("\n"),
+      threadId: msg.threadId,
+      replyToId: msg.replyToId,
+    });
   }
 
   async start(): Promise<void> {
