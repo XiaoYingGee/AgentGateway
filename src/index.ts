@@ -6,27 +6,13 @@ import { TelegramAdapter } from "./adapters/im/telegram.js";
 import { ClaudeCodeAdapter } from "./adapters/ai/claude-code.js";
 import { GeminiAdapter } from "./adapters/ai/gemini.js";
 
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    console.error(`[gateway] Missing required env: ${name}`);
-    process.exit(1);
-  }
-  return value;
+function parseUserList(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
-const botToken = requireEnv("BOT_TOKEN");
-
-// R11: validate Discord token format
-if (!/^[\w.-]+$/.test(botToken)) {
-  console.error("[gateway] BOT_TOKEN has invalid format");
-  process.exit(1);
-}
-
-const allowedUsers = (process.env["ALLOWED_USERS"] ?? "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
 const defaultCwd = process.env["DEFAULT_CWD"] ?? "/home/xyg/codebase";
 
 // R11: validate DEFAULT_CWD exists and is writable
@@ -43,31 +29,63 @@ try {
 
 const router = new Router({ defaultCwd });
 
-router.registerIM(
-  new DiscordAdapter({ token: botToken, allowedUsers })
-);
+// ── IM adapters (enable by setting <IM>_BOT_TOKEN) ────────────────────────────
+
+// Discord (accept DISCORD_BOT_TOKEN; fall back to legacy BOT_TOKEN with warning)
+const discordToken =
+  process.env["DISCORD_BOT_TOKEN"] ?? process.env["BOT_TOKEN"];
+if (process.env["BOT_TOKEN"] && !process.env["DISCORD_BOT_TOKEN"]) {
+  console.warn(
+    "[gateway] BOT_TOKEN is deprecated; please rename to DISCORD_BOT_TOKEN"
+  );
+}
+if (discordToken) {
+  if (!/^[\w.-]+$/.test(discordToken)) {
+    console.error("[gateway] DISCORD_BOT_TOKEN has invalid format");
+    process.exit(1);
+  }
+  const allowedUsers = parseUserList(
+    process.env["DISCORD_ALLOWED_USERS"] ?? process.env["ALLOWED_USERS"]
+  );
+  if (process.env["ALLOWED_USERS"] && !process.env["DISCORD_ALLOWED_USERS"]) {
+    console.warn(
+      "[gateway] ALLOWED_USERS is deprecated; please rename to DISCORD_ALLOWED_USERS"
+    );
+  }
+  router.registerIM(
+    new DiscordAdapter({ token: discordToken, allowedUsers })
+  );
+}
+
+// Telegram
+const telegramToken = process.env["TELEGRAM_BOT_TOKEN"];
+if (telegramToken) {
+  if (!/^\d+:[A-Za-z0-9_-]+$/.test(telegramToken)) {
+    console.error(
+      "[gateway] TELEGRAM_BOT_TOKEN has invalid format (expected <id>:<token>)"
+    );
+    process.exit(1);
+  }
+  const allowedUsers = parseUserList(process.env["TELEGRAM_ALLOWED_USERS"]);
+  router.registerIM(
+    new TelegramAdapter({ token: telegramToken, allowedUsers })
+  );
+}
+
+// Require at least one IM adapter
+if (!discordToken && !telegramToken) {
+  console.error(
+    "[gateway] No IM adapter configured. Set DISCORD_BOT_TOKEN and/or TELEGRAM_BOT_TOKEN."
+  );
+  process.exit(1);
+}
+
+// ── AI adapter ────────────────────────────────────────────────────────────────
 const aiBackend = process.env["AI_BACKEND"] ?? "claude-code";
 if (aiBackend === "gemini") {
   router.registerAI(new GeminiAdapter());
 } else {
   router.registerAI(new ClaudeCodeAdapter());
-}
-
-// Optional: Telegram adapter (enabled when TELEGRAM_BOT_TOKEN is set)
-const telegramToken = process.env["TELEGRAM_BOT_TOKEN"];
-if (telegramToken) {
-  // R11: validate Telegram token format (numeric:alphanumeric)
-  if (!/^\d+:[A-Za-z0-9_-]+$/.test(telegramToken)) {
-    console.error("[gateway] TELEGRAM_BOT_TOKEN has invalid format (expected <id>:<token>)");
-    process.exit(1);
-  }
-  const telegramAllowedUsers = (process.env["TELEGRAM_ALLOWED_USERS"] ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  router.registerIM(
-    new TelegramAdapter({ token: telegramToken, allowedUsers: telegramAllowedUsers })
-  );
 }
 
 router.start().catch((err) => {

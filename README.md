@@ -54,22 +54,26 @@ Connect your Discord or Telegram bot to Claude Code, Gemini, or any future AI CL
 
 ## Environment Variables
 
+Enable an IM adapter by setting `<IM>_BOT_TOKEN`. At least one IM must be configured.
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `BOT_TOKEN` | **Yes** | — | Discord bot token. Must match `[\w.-]+`. |
-| `ALLOWED_USERS` | No | `""` (reject all) | Comma-separated Discord user IDs allowed to interact. Empty = reject all (fail-closed). |
+| `DISCORD_BOT_TOKEN` | one of IM | — | Discord bot token. Enables Discord adapter. Must match `[\w.-]+`. |
+| `DISCORD_ALLOWED_USERS` | No | `""` (reject all) | Comma-separated Discord user IDs. Empty = reject all (fail-closed). |
+| `TELEGRAM_BOT_TOKEN` | one of IM | — | Telegram bot token (`<id>:<token>`). Enables Telegram adapter. |
+| `TELEGRAM_ALLOWED_USERS` | No | `""` (reject all) | Comma-separated Telegram user IDs. |
 | `DEFAULT_CWD` | No | `/home/xyg/codebase` | Base directory for session-isolated working dirs. Must exist and be writable. |
 | `AI_BACKEND` | No | `claude-code` | AI backend to use: `claude-code` or `gemini`. |
-| `TELEGRAM_BOT_TOKEN` | No | — | Telegram bot token (format: `<id>:<token>`). If set, enables the Telegram adapter. |
-| `TELEGRAM_ALLOWED_USERS` | No | `""` (reject all) | Comma-separated Telegram user IDs allowed to interact. |
-| `CLAUDE_ALLOW_BASH` | No | `false` | Allow the Bash tool in Claude Code invocations. Set to `true` to enable. |
+| `CLAUDE_MODEL` | No | CLI default | Claude Code model override (e.g. `claude-opus-4-7`, `opus`, `sonnet`). |
+| `CLAUDE_ALLOW_BASH` | No | `false` | Allow the Bash tool in Claude Code invocations. |
+
+**Legacy (deprecated, still honored with warning):** `BOT_TOKEN` → use `DISCORD_BOT_TOKEN`; `ALLOWED_USERS` → use `DISCORD_ALLOWED_USERS`.
 
 ## Quick Start
 
 **1. Install dependencies**
 
 ```bash
-cd v2
 npm install
 ```
 
@@ -77,7 +81,7 @@ npm install
 
 ```bash
 cp .env.example .env
-# Edit .env — at minimum set BOT_TOKEN and ALLOWED_USERS
+# Edit .env — set at least DISCORD_BOT_TOKEN (or TELEGRAM_BOT_TOKEN) and allowed users
 ```
 
 **3. Run**

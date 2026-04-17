@@ -15,8 +15,8 @@ if [[ -f .env ]]; then
 fi
 
 # Validate required vars
-if [[ -z "${BOT_TOKEN:-}" ]]; then
-  echo "[start] ERROR: BOT_TOKEN is not set. Copy .env.example to .env and configure it." >&2
+if [[ -z "${DISCORD_BOT_TOKEN:-}" && -z "${TELEGRAM_BOT_TOKEN:-}" && -z "${BOT_TOKEN:-}" ]]; then
+  echo "[start] ERROR: No IM bot token set. Configure DISCORD_BOT_TOKEN and/or TELEGRAM_BOT_TOKEN in .env" >&2
   exit 1
 fi
 

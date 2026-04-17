@@ -119,14 +119,18 @@ export class DiscordAdapter implements IMAdapter {
   private async onDiscordMessage(message: OmitPartialGroupDMChannel<Message>): Promise<void> {
     if (!this.handler) return;
     if (message.author.id === this.client.user!.id) return;
-    if (!message.mentions.has(this.client.user!.id)) return;
+    const mentioned = message.mentions.has(this.client.user!.id);
+    console.log(`[discord][debug] msg from=${message.author.id} guild=${message.guildId} ch=${message.channelId} mentioned=${mentioned} len=${message.content.length}`);
+    if (!mentioned) return;
 
     // M2: Bot whitelist — fail-closed
     // If allowedUsers is empty, reject everyone. Bots are always rejected unless explicitly listed.
     if (this.allowedUsers.length === 0) {
+      console.log(`[discord][debug] rejected: no allowedUsers configured`);
       return; // fail-closed: no allowedUsers configured → reject all
     }
     if (!this.allowedUsers.includes(message.author.id)) {
+      console.log(`[discord][debug] rejected: ${message.author.id} not in whitelist`);
       return; // not in whitelist → reject (both bots and humans)
     }
 
