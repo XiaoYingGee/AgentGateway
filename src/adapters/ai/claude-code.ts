@@ -68,6 +68,11 @@ export class ClaudeCodeAdapter implements AIAdapter {
         "--permission-mode", "bypassPermissions",
       ];
 
+      const model = process.env["CLAUDE_MODEL"];
+      if (model) {
+        args.push("--model", model);
+      }
+
       if (sessionId) {
         args.push("--resume", sessionId);
       }
