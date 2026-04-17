@@ -1,6 +1,7 @@
 import type { AIAdapter, IMAdapter, InboundMessage, SendResult } from "./types.js";
 import { SessionManager } from "./session.js";
 import { splitMessage } from "../utils/messages.js";
+import { parseAIPrefix } from "../utils/prefix.js";
 import { randomUUID } from "node:crypto";
 
 const EDIT_THROTTLE_MS = 1500; // S2: throttle edits
@@ -10,7 +11,8 @@ const RATE_LIMIT_MAX = 10; // R10: max messages per window
 
 export class Router {
   private imAdapters = new Map<string, IMAdapter>();
-  private aiAdapter: AIAdapter | undefined;
+  private aiAdapters = new Map<string, AIAdapter>();
+  private defaultAlias: string | null = null;
   private sessions: SessionManager;
   private defaultCwd: string;
   // R10: per-user rate limit — sliding window of timestamps
@@ -31,12 +33,47 @@ export class Router {
     adapter.onMessage((msg) => this.handleMessage(msg, adapter));
   }
 
-  registerAI(adapter: AIAdapter): void {
-    // M10: duplicate AI adapter registration throws
-    if (this.aiAdapter) {
-      throw new Error(`AI adapter already registered: ${this.aiAdapter.name}. Cannot register ${adapter.name}`);
+  registerAI(adapter: AIAdapter, opts?: { alias?: string; default?: boolean }): void {
+    const alias = opts?.alias ?? adapter.name;
+    if (this.aiAdapters.has(alias)) {
+      throw new Error(`AI adapter already registered: ${alias}`);
     }
-    this.aiAdapter = adapter;
+    this.aiAdapters.set(alias, adapter);
+    // First registered or explicitly marked as default
+    if (this.defaultAlias === null || opts?.default) {
+      this.defaultAlias = alias;
+    }
+  }
+
+  /** Return all registered AI aliases (for prefix parsing + /help) */
+  getAIAliases(): string[] {
+    return [...this.aiAdapters.keys()];
+  }
+
+  private resolveAI(
+    sessionKey: string,
+    text: string,
+  ): { alias: string; prompt: string; switched: boolean } {
+    const aliases = this.getAIAliases();
+    const { alias: prefixAlias, prompt } = parseAIPrefix(text, aliases);
+
+    const currentAI = this.sessions.getCurrentAI(sessionKey);
+
+    let targetAlias: string;
+    if (prefixAlias) {
+      targetAlias = prefixAlias;
+    } else if (currentAI) {
+      targetAlias = currentAI;
+    } else {
+      targetAlias = this.defaultAlias!;
+    }
+
+    const switched = targetAlias !== currentAI;
+    if (switched) {
+      this.sessions.setCurrentAI(sessionKey, targetAlias);
+    }
+
+    return { alias: targetAlias, prompt, switched };
   }
 
   private async handleMessage(msg: InboundMessage, im: IMAdapter): Promise<void> {
@@ -102,7 +139,20 @@ export class Router {
     const { sessionKey, chatId } = msg;
     const session = this.sessions.getOrCreate(sessionKey);
 
+    // Resolve which AI to route to (prefix > sticky > default)
+    const { alias, prompt, switched } = this.resolveAI(sessionKey, msg.text);
+    const aiAdapter = this.aiAdapters.get(alias)!;
+
     try {
+      // Send switch notice if AI changed
+      if (switched) {
+        await im.sendMessage({
+          chatId,
+          text: `🔀 已切换到 ${alias}`,
+          threadId: msg.threadId,
+        }).catch(() => {});
+      }
+
       await im.sendTyping?.(chatId);
 
       // S2: send a placeholder message if editMessage is supported
@@ -124,9 +174,9 @@ export class Router {
       // S5: pass session-specific cwd
       const invokeCwd = session.cwd ?? this.defaultCwd;
 
-      const result = await this.aiAdapter!.invoke({
-        prompt: msg.text,
-        sessionId: session.aiSessionId,
+      const result = await aiAdapter.invoke({
+        prompt,
+        sessionId: session.resumeIds[alias],
         cwd: invokeCwd,
         onChunk: (text) => {
           streamedText = text;
@@ -152,7 +202,7 @@ export class Router {
       });
 
       if (result.sessionId) {
-        this.sessions.setAiSessionId(sessionKey, result.sessionId);
+        this.sessions.setResumeId(sessionKey, alias, result.sessionId);
       }
 
       // M4: sendMessage does internal splitting now (via splitAndSend)
@@ -198,10 +248,11 @@ export class Router {
       const refId = randomUUID().slice(0, 8);
       console.error(`[router] [${refId}] Error handling message:`, errMsg);
 
-      // M7: if resume failed, retry as new session (drop aiSessionId)
-      if (session.aiSessionId && errMsg.includes("resume")) {
-        console.log(`[router] Resume failed for ${sessionKey}, falling back to new session`);
-        session.aiSessionId = undefined;
+      // M7: if resume failed, retry as new session (drop resumeId for this alias)
+      const resumeId = session.resumeIds[alias];
+      if (resumeId && errMsg.includes("resume")) {
+        console.log(`[router] Resume failed for ${sessionKey}/${alias}, falling back to new session`);
+        delete session.resumeIds[alias];
       }
 
       await im.sendMessage({
@@ -235,8 +286,8 @@ export class Router {
   }
 
   async start(): Promise<void> {
-    // S6: assert AI adapter is registered
-    if (!this.aiAdapter) {
+    // S6: assert at least one AI adapter is registered
+    if (this.aiAdapters.size === 0) {
       throw new Error("Cannot start: no AI adapter registered");
     }
 
@@ -244,7 +295,8 @@ export class Router {
       await im.connect();
       console.log(`[router] Connected IM adapter: ${im.platform}:${im.accountId}`);
     }
-    console.log(`[router] AI adapter: ${this.aiAdapter.name}`);
+    const aliases = this.getAIAliases();
+    console.log(`[router] AI adapters: ${aliases.join(", ")} (default: ${this.defaultAlias})`);
     console.log(`[router] Gateway started`);
   }
 
@@ -261,8 +313,10 @@ export class Router {
     }
     if (this.sessions.hasActiveSessions()) {
       console.warn(`[router] Shutdown timeout — some sessions still active`);
-      // P3: force-kill lingering AI child processes
-      this.aiAdapter?.killAll?.();
+      // P3: force-kill lingering AI child processes — all adapters
+      for (const ai of this.aiAdapters.values()) {
+        ai.killAll?.();
+      }
     }
 
     this.sessions.destroy();

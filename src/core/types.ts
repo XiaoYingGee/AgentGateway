@@ -57,7 +57,10 @@ export interface AIAdapter {
 /** Session state for an active conversation */
 export interface Session {
   key: string;
-  aiSessionId?: string;
+  /** Per-AI resume IDs — preserves session continuity when switching between AIs */
+  resumeIds: Record<string, string>;
+  /** Currently active AI alias for this session */
+  currentAI?: string;
   /** cwd used for this session's AI invocations */
   cwd?: string;
   busy: boolean;

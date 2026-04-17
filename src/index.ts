@@ -84,16 +84,41 @@ if (!discordToken && !telegramToken && !slackBotToken) {
   process.exit(1);
 }
 
-// ── AI adapter ────────────────────────────────────────────────────────────────
-const aiBackend = process.env["AI_BACKEND"] ?? "claude-code";
-if (aiBackend === "gemini") {
-  router.registerAI(new GeminiAdapter());
-} else if (aiBackend === "codex") {
-  router.registerAI(new CodexAdapter());
-} else if (aiBackend === "opencode") {
-  router.registerAI(new OpenCodeAdapter());
-} else {
-  router.registerAI(new ClaudeCodeAdapter());
+// ── AI adapters (multi-AI routing) ────────────────────────────────────────────
+const knownBackends: Record<string, () => import("./core/types.js").AIAdapter> = {
+  "claude-code": () => new ClaudeCodeAdapter(),
+  "gemini": () => new GeminiAdapter(),
+  "codex": () => new CodexAdapter(),
+  "opencode": () => new OpenCodeAdapter(),
+};
+
+const backendsRaw = process.env["AI_BACKENDS"];
+if (!backendsRaw || !backendsRaw.trim()) {
+  console.error("[gateway] AI_BACKENDS is required (comma-separated, e.g. claude-code,gemini)");
+  process.exit(1);
+}
+
+const backendList = backendsRaw.split(",").map((s) => s.trim()).filter(Boolean);
+if (backendList.length === 0) {
+  console.error("[gateway] AI_BACKENDS must contain at least one backend");
+  process.exit(1);
+}
+
+const unknownBackends = backendList.filter((b) => !(b in knownBackends));
+if (unknownBackends.length > 0) {
+  console.error(`[gateway] Unknown AI backends: ${unknownBackends.join(", ")}. Known: ${Object.keys(knownBackends).join(", ")}`);
+  process.exit(1);
+}
+
+const aiDefault = process.env["AI_DEFAULT"];
+if (aiDefault && !backendList.includes(aiDefault)) {
+  console.error(`[gateway] AI_DEFAULT="${aiDefault}" is not in AI_BACKENDS list`);
+  process.exit(1);
+}
+
+for (const name of backendList) {
+  const isDefault = aiDefault ? name === aiDefault : undefined; // first registered is default when AI_DEFAULT unset
+  router.registerAI(knownBackends[name]!(), { alias: name, default: isDefault || undefined });
 }
 
 router.start().catch((err) => {

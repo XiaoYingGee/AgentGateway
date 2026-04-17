@@ -64,6 +64,7 @@ export class SessionManager {
       session = {
         key,
         cwd,
+        resumeIds: {},
         busy: false,
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
@@ -89,9 +90,22 @@ export class SessionManager {
     }
   }
 
-  setAiSessionId(key: string, aiSessionId: string): void {
+  setResumeId(key: string, alias: string, resumeId: string): void {
     const session = this.getOrCreate(key);
-    session.aiSessionId = aiSessionId;
+    session.resumeIds[alias] = resumeId;
+  }
+
+  getResumeId(key: string, alias: string): string | undefined {
+    return this.sessions.get(key)?.resumeIds[alias];
+  }
+
+  setCurrentAI(key: string, alias: string): void {
+    const session = this.getOrCreate(key);
+    session.currentAI = alias;
+  }
+
+  getCurrentAI(key: string): string | undefined {
+    return this.sessions.get(key)?.currentAI;
   }
 
   delete(key: string): void {

@@ -40,6 +40,33 @@ Connect your Discord or Telegram bot to Claude Code, Gemini, or any future AI CL
 | **SessionManager** | Per-user isolated working directories, TTL-based cleanup (24h), message queue (max 20 / 50K chars). |
 | **AIAdapter** | Spawns a local AI CLI process, streams output back. Supports session resume (Claude Code) and timeout (5 min). |
 
+## Multi-AI Routing
+
+A single bot can be connected to multiple AI backends simultaneously. Users switch between them using message prefixes:
+
+```
+/claude-code help me debug this function
+/gemini translate this to Japanese
+/codex refactor the auth module
+```
+
+**Session stickiness:** After switching, subsequent messages without a prefix continue using the last-selected AI. Each AI maintains its own session resume ID, so switching back picks up where you left off.
+
+```
+/gemini hello          → routes to Gemini, session sticks
+follow-up question     → still Gemini (sticky)
+/claude-code explain   → switches to Claude Code, shows 🔀 notice
+another question       → still Claude Code
+/gemini continue       → back to Gemini, resumes previous session
+```
+
+Configure via environment variables:
+
+```bash
+AI_BACKENDS=claude-code,gemini    # enable both
+AI_DEFAULT=claude-code            # optional, first in list is default
+```
+
 ## Supported Platforms
 
 | IM Platform | Features |
@@ -69,7 +96,8 @@ Enable an IM adapter by setting `<IM>_BOT_TOKEN`. At least one IM must be config
 | `SLACK_APP_TOKEN` | with Slack | — | Slack app-level token (`xapp-...`) for Socket Mode. |
 | `SLACK_ALLOWED_USERS` | No | `""` (reject all) | Comma-separated Slack user IDs (e.g. `U12345678`). |
 | `DEFAULT_CWD` | No | `/home/xyg/codebase` | Base directory for session-isolated working dirs. Must exist and be writable. |
-| `AI_BACKEND` | No | `claude-code` | AI backend to use: `claude-code`, `gemini`, `codex`, or `opencode`. |
+| `AI_BACKENDS` | Yes | — | Comma-separated AI backends to enable: `claude-code`, `gemini`, `codex`, `opencode`. Users switch with `/claude-code`, `/gemini` prefix in chat. |
+| `AI_DEFAULT` | No | first in list | Default AI backend (must be in `AI_BACKENDS`). |
 | `CLAUDE_MODEL` | No | CLI default | Claude Code model override (e.g. `claude-opus-4-7`, `opus`, `sonnet`). |
 | `CLAUDE_ALLOW_BASH` | No | `false` | Allow the Bash tool in Claude Code invocations. |
 
@@ -138,7 +166,7 @@ npm run build && npm start
      }): Promise<{ text: string; sessionId?: string; exitCode: number }>;
    }
    ```
-3. Add the backend option in `src/index.ts` under the `AI_BACKEND` switch.
+3. Add the backend name to the `knownBackends` map in `src/index.ts`.
 
 ## Scripts
 
