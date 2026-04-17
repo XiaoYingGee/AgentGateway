@@ -5,6 +5,9 @@ import { DiscordAdapter } from "./adapters/im/discord.js";
 import { TelegramAdapter } from "./adapters/im/telegram.js";
 import { ClaudeCodeAdapter } from "./adapters/ai/claude-code.js";
 import { GeminiAdapter } from "./adapters/ai/gemini.js";
+import { CodexAdapter } from "./adapters/ai/codex.js";
+import { OpenCodeAdapter } from "./adapters/ai/opencode.js";
+import { SlackAdapter } from "./adapters/im/slack.js";
 
 function parseUserList(value: string | undefined): string[] {
   return (value ?? "")
@@ -59,10 +62,24 @@ if (telegramToken) {
   );
 }
 
+// Slack
+const slackBotToken = process.env["SLACK_BOT_TOKEN"];
+if (slackBotToken) {
+  const slackAppToken = process.env["SLACK_APP_TOKEN"];
+  if (!slackAppToken) {
+    console.error("[gateway] SLACK_APP_TOKEN is required when SLACK_BOT_TOKEN is set");
+    process.exit(1);
+  }
+  const allowedUsers = parseUserList(process.env["SLACK_ALLOWED_USERS"]);
+  router.registerIM(
+    new SlackAdapter({ botToken: slackBotToken, appToken: slackAppToken, allowedUsers })
+  );
+}
+
 // Require at least one IM adapter
-if (!discordToken && !telegramToken) {
+if (!discordToken && !telegramToken && !slackBotToken) {
   console.error(
-    "[gateway] No IM adapter configured. Set DISCORD_BOT_TOKEN and/or TELEGRAM_BOT_TOKEN."
+    "[gateway] No IM adapter configured. Set DISCORD_BOT_TOKEN, TELEGRAM_BOT_TOKEN, and/or SLACK_BOT_TOKEN."
   );
   process.exit(1);
 }
@@ -71,6 +88,10 @@ if (!discordToken && !telegramToken) {
 const aiBackend = process.env["AI_BACKEND"] ?? "claude-code";
 if (aiBackend === "gemini") {
   router.registerAI(new GeminiAdapter());
+} else if (aiBackend === "codex") {
+  router.registerAI(new CodexAdapter());
+} else if (aiBackend === "opencode") {
+  router.registerAI(new OpenCodeAdapter());
 } else {
   router.registerAI(new ClaudeCodeAdapter());
 }

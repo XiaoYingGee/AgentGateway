@@ -7,9 +7,10 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
-    "test": "tsx --test tests/smoke.test.ts tests/router.test.ts"
+    "test": "tsx --test tests/smoke.test.ts tests/router.test.ts tests/adapters.test.ts"
   },
   "dependencies": {
+    "@slack/bolt": "^4.7.0",
     "discord.js": "^14.16.0",
     "dotenv": "^16.4.0",
     "grammy": "^1.42.0"

@@ -7,12 +7,12 @@ Connect your Discord or Telegram bot to Claude Code, Gemini, or any future AI CL
 ## Architecture
 
 ```
- ┌──────────────┐     ┌──────────────┐
- │   Discord    │     │   Telegram   │       ... more IM adapters
- │  IMAdapter   │     │  IMAdapter   │
- └──────┬───────┘     └──────┬───────┘
-        │                    │
-        └────────┬───────────┘
+ ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+ │   Discord    │     │   Telegram   │     │    Slack     │  ... more IM adapters
+ │  IMAdapter   │     │  IMAdapter   │     │  IMAdapter   │
+ └──────┬───────┘     └──────┬───────┘     └──────┬───────┘
+        │                    │                    │
+        └────────┬───────────┴────────────────────┘
                  │
          ┌───────▼────────┐
          │     Router      │
@@ -25,10 +25,10 @@ Connect your Discord or Telegram bot to Claude Code, Gemini, or any future AI CL
                  │
         ┌────────┴───────────┐
         │                    │
- ┌──────▼───────┐    ┌──────▼───────┐
- │  Claude Code │    │    Gemini    │       ... more AI adapters
- │  AIAdapter   │    │  AIAdapter   │
- └──────────────┘    └──────────────┘
+ ┌──────▼───────┐    ┌──────▼───────┐    ┌──────▼───────┐    ┌──────▼───────┐
+ │  Claude Code │    │    Gemini    │    │    Codex     │    │   OpenCode   │
+ │  AIAdapter   │    │  AIAdapter   │    │  AIAdapter   │    │  AIAdapter   │
+ └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
 ```
 
 **Key components:**
@@ -46,11 +46,14 @@ Connect your Discord or Telegram bot to Claude Code, Gemini, or any future AI CL
 |-------------|----------|
 | **Discord** | Threads, reactions, message editing (streaming), DM & guild channels |
 | **Telegram** | Topics/threads, message editing (streaming), private & group chats |
+| **Slack** | Threads (thread_ts), message editing (chat.update), DM & channel mentions, Socket Mode |
 
 | AI Backend | Session Resume | Streaming |
 |------------|---------------|-----------|
 | **Claude Code** | Yes | Yes (JSON stream) |
 | **Gemini** | No | Yes (stdout) |
+| **Codex** | No | Yes (stdout) |
+| **OpenCode** | No | Yes (stdout) |
 
 ## Environment Variables
 
@@ -62,8 +65,11 @@ Enable an IM adapter by setting `<IM>_BOT_TOKEN`. At least one IM must be config
 | `DISCORD_ALLOWED_USERS` | No | `""` (reject all) | Comma-separated Discord user IDs. Empty = reject all (fail-closed). |
 | `TELEGRAM_BOT_TOKEN` | one of IM | — | Telegram bot token (`<id>:<token>`). Enables Telegram adapter. |
 | `TELEGRAM_ALLOWED_USERS` | No | `""` (reject all) | Comma-separated Telegram user IDs. |
+| `SLACK_BOT_TOKEN` | one of IM | — | Slack bot token (`xoxb-...`). Enables Slack adapter. |
+| `SLACK_APP_TOKEN` | with Slack | — | Slack app-level token (`xapp-...`) for Socket Mode. |
+| `SLACK_ALLOWED_USERS` | No | `""` (reject all) | Comma-separated Slack user IDs (e.g. `U12345678`). |
 | `DEFAULT_CWD` | No | `/home/xyg/codebase` | Base directory for session-isolated working dirs. Must exist and be writable. |
-| `AI_BACKEND` | No | `claude-code` | AI backend to use: `claude-code` or `gemini`. |
+| `AI_BACKEND` | No | `claude-code` | AI backend to use: `claude-code`, `gemini`, `codex`, or `opencode`. |
 | `CLAUDE_MODEL` | No | CLI default | Claude Code model override (e.g. `claude-opus-4-7`, `opus`, `sonnet`). |
 | `CLAUDE_ALLOW_BASH` | No | `false` | Allow the Bash tool in Claude Code invocations. |
 
@@ -141,7 +147,7 @@ npm run build && npm start
 | `npm run dev` | Start in development mode with hot-reload (tsx watch) |
 | `npm run build` | Compile TypeScript to `dist/` |
 | `npm start` | Run compiled production build |
-| `npm test` | Run smoke tests (30 tests) |
+| `npm test` | Run smoke tests |
 
 ## License
 
