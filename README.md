@@ -100,6 +100,35 @@ Enable an IM adapter by setting `<IM>_BOT_TOKEN`. At least one IM must be config
 | `AI_DEFAULT` | No | first in list | Default AI backend (must be in `AI_BACKENDS`). |
 | `CLAUDE_MODEL` | No | CLI default | Claude Code model override (e.g. `claude-opus-4-7`, `opus`, `sonnet`). |
 | `CLAUDE_ALLOW_BASH` | No | `false` | Allow the Bash tool in Claude Code invocations. |
+| `AUTO_REPLY_IN_DM` | No | `true` | Auto-reply in DMs without requiring @mention. |
+| `AUTO_REPLY_IN_THREADS` | No | `true` | Auto-reply in threads without requiring @mention (Discord threads, Slack threads). |
+
+## DM & Thread Auto-Reply
+
+By default, the bot responds to messages in DMs and threads without requiring an @mention. In group channels, @mention is still required.
+
+| Context | Discord | Telegram | Slack |
+|---------|---------|----------|-------|
+| **DM** | Auto-reply (no @mention needed) | Auto-reply (no @mention needed) | Auto-reply (no @mention needed) |
+| **Thread** | Auto-reply (no @mention needed) | Auto-reply in topics (no @mention needed) | Auto-reply (no @mention needed) |
+| **Channel** | @mention required | @bot_username required | @mention required |
+
+Disable with `AUTO_REPLY_IN_DM=false` or `AUTO_REPLY_IN_THREADS=false`.
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available AI backends, usage examples, and current session AI. Does not invoke AI. |
+
+## Reaction Feedback
+
+On platforms that support it (Discord, Slack), the bot reacts to your message with:
+- ⏳ when processing starts
+- ✅ when processing completes successfully
+- ❌ when an error occurs
+
+Telegram does not support bot reactions. If the bot lacks reaction permissions, it fails silently.
 
 ## Quick Start
 

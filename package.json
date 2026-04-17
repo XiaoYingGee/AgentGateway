@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
-    "test": "tsx --test tests/smoke.test.ts tests/router.test.ts tests/adapters.test.ts tests/routing.test.ts"
+    "test": "tsx --test tests/smoke.test.ts tests/router.test.ts tests/adapters.test.ts tests/routing.test.ts tests/features.test.ts"
   },
   "dependencies": {
     "@slack/bolt": "^4.7.0",
