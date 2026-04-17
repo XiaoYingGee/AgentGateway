@@ -15,6 +15,8 @@ export interface DiscordAdapterOptions {
   token: string;
   allowedUsers: string[];
   accountId?: string;
+  autoReplyInDM?: boolean;
+  autoReplyInThreads?: boolean;
 }
 
 export class DiscordAdapter implements IMAdapter {
@@ -25,17 +27,22 @@ export class DiscordAdapter implements IMAdapter {
   private client: Client;
   private token: string;
   private allowedUsers: string[];
+  private autoReplyInDM: boolean;
+  private autoReplyInThreads: boolean;
   private handler?: (msg: InboundMessage) => Promise<void>;
 
   constructor(opts: DiscordAdapterOptions) {
     this.token = opts.token;
     this.allowedUsers = opts.allowedUsers;
     this.accountId = opts.accountId ?? "default";
+    this.autoReplyInDM = opts.autoReplyInDM ?? true;
+    this.autoReplyInThreads = opts.autoReplyInThreads ?? true;
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages,
       ],
       // M2: disable default mention parsing
       allowedMentions: { parse: [] },
@@ -116,12 +123,46 @@ export class DiscordAdapter implements IMAdapter {
     }
   }
 
+  async react(chatId: string, messageId: string, emoji: string): Promise<void> {
+    try {
+      const channel = await this.client.channels.fetch(chatId);
+      if (channel && "messages" in channel) {
+        const msg = await (channel as TextChannel).messages.fetch(messageId);
+        await msg.react(emoji);
+      }
+    } catch {
+      // Silent — bot may lack permission
+    }
+  }
+
+  async unreact(chatId: string, messageId: string, emoji: string): Promise<void> {
+    try {
+      const channel = await this.client.channels.fetch(chatId);
+      if (channel && "messages" in channel) {
+        const msg = await (channel as TextChannel).messages.fetch(messageId);
+        await msg.reactions.cache.get(emoji)?.users.remove(this.client.user!.id);
+      }
+    } catch {
+      // Silent — message may have been deleted
+    }
+  }
+
   private async onDiscordMessage(message: OmitPartialGroupDMChannel<Message>): Promise<void> {
     if (!this.handler) return;
     if (message.author.id === this.client.user!.id) return;
+
+    const isDM = !message.guildId;
+    const isThread = !isDM && (message.channel as TextChannel | ThreadChannel).isThread();
     const mentioned = message.mentions.has(this.client.user!.id);
-    console.log(`[discord][debug] msg from=${message.author.id} guild=${message.guildId} ch=${message.channelId} mentioned=${mentioned} len=${message.content.length}`);
-    if (!mentioned) return;
+
+    // Auto-reply: skip mention check in DM or thread when enabled
+    const mentionRequired = !(
+      (isDM && this.autoReplyInDM) ||
+      (isThread && this.autoReplyInThreads)
+    );
+
+    console.log(`[discord][debug] msg from=${message.author.id} guild=${message.guildId} ch=${message.channelId} mentioned=${mentioned} isDM=${isDM} isThread=${isThread} mentionRequired=${mentionRequired}`);
+    if (mentionRequired && !mentioned) return;
 
     // M2: Bot whitelist — fail-closed
     // If allowedUsers is empty, reject everyone. Bots are always rejected unless explicitly listed.
@@ -153,17 +194,13 @@ export class DiscordAdapter implements IMAdapter {
     }
 
     // M1: Session key with user dimension
-    // Format: discord:guild:<guildId>:channel:<channelId>:user:<userId>
-    // DM: discord:dm:user:<userId>
-    // Future: could be configured to "shared" strategy (omit user segment)
     const guildId = message.guildId;
-    const isThread = channel.isThread();
 
     let sessionKey: string;
     // S3: chatId is always the real channel (for threads, use parent channel)
     let chatId: string;
 
-    if (!guildId) {
+    if (isDM) {
       // DM
       sessionKey = `discord:dm:user:${message.author.id}`;
       chatId = channel.id;

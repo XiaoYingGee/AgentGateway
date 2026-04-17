@@ -11,22 +11,28 @@ export interface SlackAdapterOptions {
   appToken: string;
   allowedUsers: string[];
   accountId?: string;
+  autoReplyInDM?: boolean;
+  autoReplyInThreads?: boolean;
 }
 
 export class SlackAdapter extends BaseIMAdapter implements IMAdapter {
   readonly platform = "slack";
   readonly accountId: string;
-  readonly capabilities = { threads: true, reactions: false };
+  readonly capabilities = { threads: true, reactions: true };
 
   private app: InstanceType<typeof App>;
   private botUserId?: string;
   private allowedUsers: string[];
+  private autoReplyInDM: boolean;
+  private autoReplyInThreads: boolean;
   private handler?: (msg: InboundMessage) => Promise<void>;
 
   constructor(opts: SlackAdapterOptions) {
     super();
     this.allowedUsers = opts.allowedUsers;
     this.accountId = opts.accountId ?? "default";
+    this.autoReplyInDM = opts.autoReplyInDM ?? true;
+    this.autoReplyInThreads = opts.autoReplyInThreads ?? true;
     this.app = new App({
       token: opts.botToken,
       appToken: opts.appToken,
@@ -112,6 +118,33 @@ export class SlackAdapter extends BaseIMAdapter implements IMAdapter {
     // Slack doesn't have a typing indicator API for bots
   }
 
+  async react(chatId: string, messageId: string, emoji: string): Promise<void> {
+    try {
+      // Slack uses emoji names without colons (e.g. "hourglass_flowing_sand" not ":hourglass_flowing_sand:")
+      const name = emojiToSlackName(emoji);
+      await this.app.client.reactions.add({
+        channel: chatId,
+        timestamp: messageId,
+        name,
+      });
+    } catch {
+      // Silent — bot may lack reactions:write scope
+    }
+  }
+
+  async unreact(chatId: string, messageId: string, emoji: string): Promise<void> {
+    try {
+      const name = emojiToSlackName(emoji);
+      await this.app.client.reactions.remove({
+        channel: chatId,
+        timestamp: messageId,
+        name,
+      });
+    } catch {
+      // Silent — reaction may not exist or message deleted
+    }
+  }
+
   private isAllowed(userId: string): boolean {
     if (this.allowedUsers.length === 0) return false;
     return this.allowedUsers.includes(userId);
@@ -125,11 +158,15 @@ export class SlackAdapter extends BaseIMAdapter implements IMAdapter {
     const userId = event.user;
     if (!userId) return;
 
-    // Only handle DMs (im) — channel messages require @mention via app_mention event
-    if (event.channel_type !== "im") return;
+    const isDM = event.channel_type === "im";
+    const isThread = !!event.thread_ts;
+
+    // Auto-reply logic: DMs don't need mention, threads don't need mention (if enabled)
+    // Channel messages without thread require @mention (handled by app_mention event)
+    if (!isDM && !(isThread && this.autoReplyInThreads)) return;
 
     if (!this.isAllowed(userId)) {
-      console.log(`[slack][debug] rejected DM from ${userId}: not in whitelist`);
+      console.log(`[slack][debug] rejected message from ${userId}: not in whitelist`);
       return;
     }
 
@@ -139,7 +176,11 @@ export class SlackAdapter extends BaseIMAdapter implements IMAdapter {
     const chatId = event.channel;
     const threadId = event.thread_ts as string | undefined;
 
-    const sessionKey = `slack:dm:user:${userId}`;
+    const sessionKey = isDM
+      ? `slack:dm:user:${userId}`
+      : threadId
+        ? `slack:channel:${chatId}:thread:${threadId}:user:${userId}`
+        : `slack:channel:${chatId}:user:${userId}`;
 
     const inbound: InboundMessage = {
       platform: "slack",
@@ -162,6 +203,10 @@ export class SlackAdapter extends BaseIMAdapter implements IMAdapter {
 
     const userId = event.user;
     if (!userId) return;
+
+    // If thread auto-reply is enabled and this is a thread message,
+    // skip — already handled by onSlackMessage to avoid duplicates
+    if (this.autoReplyInThreads && event.thread_ts) return;
 
     if (!this.isAllowed(userId)) {
       console.log(`[slack][debug] rejected mention from ${userId}: not in whitelist`);
@@ -213,4 +258,15 @@ export function buildSlackSessionKey(
   const base = `slack:channel:${chatId}`;
   const threadPart = threadId ? `:thread:${threadId}` : "";
   return `${base}${threadPart}:user:${userId}`;
+}
+
+/** Map Unicode emoji to Slack reaction name */
+const EMOJI_MAP: Record<string, string> = {
+  "⏳": "hourglass_flowing_sand",
+  "✅": "white_check_mark",
+  "❌": "x",
+};
+
+function emojiToSlackName(emoji: string): string {
+  return EMOJI_MAP[emoji] ?? emoji;
 }

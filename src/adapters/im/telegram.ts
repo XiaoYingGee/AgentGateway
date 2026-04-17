@@ -9,6 +9,8 @@ export interface TelegramAdapterOptions {
   token: string;
   allowedUsers: string[];
   accountId?: string;
+  autoReplyInDM?: boolean;
+  autoReplyInThreads?: boolean;
 }
 
 export class TelegramAdapter extends BaseIMAdapter implements IMAdapter {
@@ -18,12 +20,16 @@ export class TelegramAdapter extends BaseIMAdapter implements IMAdapter {
 
   private bot: Bot;
   private allowedUsers: string[];
+  private autoReplyInDM: boolean;
+  private autoReplyInThreads: boolean;
   private handler?: (msg: InboundMessage) => Promise<void>;
 
   constructor(opts: TelegramAdapterOptions) {
     super();
     this.allowedUsers = opts.allowedUsers;
     this.accountId = opts.accountId ?? "default";
+    this.autoReplyInDM = opts.autoReplyInDM ?? true;
+    this.autoReplyInThreads = opts.autoReplyInThreads ?? true;
     this.bot = new Bot(opts.token);
   }
 
@@ -132,6 +138,24 @@ export class TelegramAdapter extends BaseIMAdapter implements IMAdapter {
       ? String(msg.message_thread_id)
       : undefined;
 
+    // Mention check for groups: require @bot_username unless auto-reply applies
+    const isPrivate = chatType === "private";
+    const isThread = !!threadId;
+    const autoReply = (isPrivate && this.autoReplyInDM) || (isThread && this.autoReplyInThreads);
+
+    if (!isPrivate && !autoReply) {
+      // In groups, require @bot_username mention
+      const botUsername = this.bot.botInfo?.username;
+      if (!botUsername || !text.includes(`@${botUsername}`)) return;
+    }
+
+    // Strip bot mention from text
+    const botUser = this.bot.botInfo?.username;
+    const cleanText = botUser
+      ? text.split(`@${botUser}`).join("").trim()
+      : text;
+    if (!cleanText) return;
+
     const sessionKey = buildSessionKey(chatType, chatId, userId, threadId);
 
     const inbound: InboundMessage = {
@@ -141,7 +165,7 @@ export class TelegramAdapter extends BaseIMAdapter implements IMAdapter {
       accountId: this.accountId,
       userId,
       userName: msg.from!.username ?? msg.from!.first_name,
-      text,
+      text: cleanText,
       threadId,
       replyToId: String(msg.message_id),
       raw: msg,

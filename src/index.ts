@@ -32,6 +32,10 @@ try {
 
 const router = new Router({ defaultCwd });
 
+// ── Auto-reply config ────────────────────────────────────────────────────────
+const autoReplyInDM = process.env["AUTO_REPLY_IN_DM"] !== "false";
+const autoReplyInThreads = process.env["AUTO_REPLY_IN_THREADS"] !== "false";
+
 // ── IM adapters (enable by setting <IM>_BOT_TOKEN) ────────────────────────────
 
 // Discord
@@ -43,7 +47,7 @@ if (discordToken) {
   }
   const allowedUsers = parseUserList(process.env["DISCORD_ALLOWED_USERS"]);
   router.registerIM(
-    new DiscordAdapter({ token: discordToken, allowedUsers })
+    new DiscordAdapter({ token: discordToken, allowedUsers, autoReplyInDM, autoReplyInThreads })
   );
 }
 
@@ -58,7 +62,7 @@ if (telegramToken) {
   }
   const allowedUsers = parseUserList(process.env["TELEGRAM_ALLOWED_USERS"]);
   router.registerIM(
-    new TelegramAdapter({ token: telegramToken, allowedUsers })
+    new TelegramAdapter({ token: telegramToken, allowedUsers, autoReplyInDM, autoReplyInThreads })
   );
 }
 
@@ -72,7 +76,7 @@ if (slackBotToken) {
   }
   const allowedUsers = parseUserList(process.env["SLACK_ALLOWED_USERS"]);
   router.registerIM(
-    new SlackAdapter({ botToken: slackBotToken, appToken: slackAppToken, allowedUsers })
+    new SlackAdapter({ botToken: slackBotToken, appToken: slackAppToken, allowedUsers, autoReplyInDM, autoReplyInThreads })
   );
 }
 
