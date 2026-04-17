@@ -67,8 +67,6 @@ Enable an IM adapter by setting `<IM>_BOT_TOKEN`. At least one IM must be config
 | `CLAUDE_MODEL` | No | CLI default | Claude Code model override (e.g. `claude-opus-4-7`, `opus`, `sonnet`). |
 | `CLAUDE_ALLOW_BASH` | No | `false` | Allow the Bash tool in Claude Code invocations. |
 
-**Legacy (deprecated, still honored with warning):** `BOT_TOKEN` → use `DISCORD_BOT_TOKEN`; `ALLOWED_USERS` → use `DISCORD_ALLOWED_USERS`.
-
 ## Quick Start
 
 **1. Install dependencies**

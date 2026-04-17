@@ -31,27 +31,14 @@ const router = new Router({ defaultCwd });
 
 // ── IM adapters (enable by setting <IM>_BOT_TOKEN) ────────────────────────────
 
-// Discord (accept DISCORD_BOT_TOKEN; fall back to legacy BOT_TOKEN with warning)
-const discordToken =
-  process.env["DISCORD_BOT_TOKEN"] ?? process.env["BOT_TOKEN"];
-if (process.env["BOT_TOKEN"] && !process.env["DISCORD_BOT_TOKEN"]) {
-  console.warn(
-    "[gateway] BOT_TOKEN is deprecated; please rename to DISCORD_BOT_TOKEN"
-  );
-}
+// Discord
+const discordToken = process.env["DISCORD_BOT_TOKEN"];
 if (discordToken) {
   if (!/^[\w.-]+$/.test(discordToken)) {
     console.error("[gateway] DISCORD_BOT_TOKEN has invalid format");
     process.exit(1);
   }
-  const allowedUsers = parseUserList(
-    process.env["DISCORD_ALLOWED_USERS"] ?? process.env["ALLOWED_USERS"]
-  );
-  if (process.env["ALLOWED_USERS"] && !process.env["DISCORD_ALLOWED_USERS"]) {
-    console.warn(
-      "[gateway] ALLOWED_USERS is deprecated; please rename to DISCORD_ALLOWED_USERS"
-    );
-  }
+  const allowedUsers = parseUserList(process.env["DISCORD_ALLOWED_USERS"]);
   router.registerIM(
     new DiscordAdapter({ token: discordToken, allowedUsers })
   );
