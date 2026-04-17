@@ -34,6 +34,10 @@ export interface IMAdapter {
   sendTyping?(chatId: string): Promise<void>;
   /** R2: Edit an existing message — uses SendResult target for correct chatId */
   editMessage?(target: SendResult, text: string): Promise<void>;
+  /** Reaction feedback — add emoji reaction to a message */
+  react?(chatId: string, messageId: string, emoji: string): Promise<void>;
+  /** Reaction feedback — remove emoji reaction from a message */
+  unreact?(chatId: string, messageId: string, emoji: string): Promise<void>;
   onMessage(handler: (msg: InboundMessage) => Promise<void>): void;
   capabilities?: { threads?: boolean; reactions?: boolean };
   /** P5: health check — returns false if adapter is in a degraded state */
