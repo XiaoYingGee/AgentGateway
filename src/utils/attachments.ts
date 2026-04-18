@@ -1,7 +1,10 @@
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, stat, unlink } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import net from "node:net";
 import path from "node:path";
 
 /** Unified attachment descriptor produced by IM adapters. */
@@ -25,6 +28,8 @@ export interface DownloadedAttachment {
 const DEFAULT_MAX_SIZE = 25 * 1024 * 1024; // 25 MB
 const DEFAULT_WHITELIST = ["image/", "text/", "application/pdf", "application/json"];
 const FILENAME_MAX = 200;
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 
 export class AttachmentError extends Error {
   constructor(message: string, public readonly reason: "size" | "mime" | "download" | "io") {
@@ -76,8 +81,14 @@ export function sanitizeFilename(name: string): string {
   // Strip control chars and other risky characters
   // eslint-disable-next-line no-control-regex
   s = s.replace(/[\x00-\x1f\x7f<>:"|?*]/g, "_");
+  // Strip zero-width / RTL override / BOM-class chars
+  s = s.replace(/[\u200B-\u200F\u202A-\u202E\uFEFF]/g, "_");
   s = s.trim().replace(/^\.+/, "");
+  // Strip trailing dots and spaces (Windows would silently trim them)
+  s = s.replace(/[. ]+$/, "");
   if (!s) s = "file";
+  // Windows reserved device names — prefix to avoid downstream tooling issues
+  if (WINDOWS_RESERVED.test(s)) s = "_" + s;
   if (s.length > FILENAME_MAX) {
     const ext = path.extname(s).slice(0, 16);
     s = s.slice(0, FILENAME_MAX - ext.length) + ext;
@@ -85,10 +96,121 @@ export function sanitizeFilename(name: string): string {
   return s;
 }
 
+/**
+ * Hash a sessionId into a stable, filesystem-safe directory name.
+ * Avoids collisions from sanitizeFilename collapsing different separators
+ * (e.g. "a/b" and "a_b" used to share a directory).
+ */
+export function hashSessionId(sessionId: string): string {
+  return createHash("sha256").update(String(sessionId ?? "")).digest("hex").slice(0, 32);
+}
+
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n}B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
   return `${(n / (1024 * 1024)).toFixed(2)}MB`;
+}
+
+/**
+ * Return true when an IP literal sits in a private/loopback/link-local/CGN/
+ * multicast/unspecified range. Used by the SSRF guard.
+ */
+export function isPrivateIp(ip: string): boolean {
+  const fam = net.isIP(ip);
+  if (fam === 0) return false;
+  if (fam === 4) {
+    const parts = ip.split(".").map((p) => Number(p));
+    if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+      return true; // malformed → treat as private
+    }
+    const [a, b] = parts as [number, number, number, number];
+    if (a === 0) return true;                       // 0.0.0.0/8 unspecified
+    if (a === 10) return true;                      // 10/8
+    if (a === 127) return true;                     // 127/8 loopback
+    if (a === 169 && b === 254) return true;        // 169.254/16 link-local
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12
+    if (a === 192 && b === 168) return true;        // 192.168/16
+    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64/10 CGN
+    if (a >= 224 && a <= 239) return true;          // multicast
+    if (a >= 240) return true;                      // reserved + broadcast
+    return false;
+  }
+  // IPv6
+  const lower = ip.toLowerCase();
+  if (lower === "::" || lower === "::1") return true;
+  if (lower.startsWith("fe8") || lower.startsWith("fe9") || lower.startsWith("fea") || lower.startsWith("feb")) {
+    return true; // fe80::/10 link-local
+  }
+  // fc00::/7 unique local
+  const firstHextet = lower.split(":")[0] ?? "";
+  if (firstHextet.length > 0) {
+    const hex = parseInt(firstHextet, 16);
+    if (Number.isFinite(hex) && (hex & 0xfe00) === 0xfc00) return true; // fc00::/7
+    if (Number.isFinite(hex) && (hex & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+  }
+  // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) → recurse on the embedded v4
+  const v4 = lower.match(/^::ffff:([0-9.]+)$/);
+  if (v4) return isPrivateIp(v4[1]!);
+  return false;
+}
+
+/** Redact bot-token-style fragments from a URL for safe logging. */
+export function redactToken(s: string): string {
+  if (!s) return s;
+  return String(s).replace(/(bot)(\d+:[A-Za-z0-9_-]+)/gi, "$1<redacted>")
+                  .replace(/(token=)[^&\s]+/gi, "$1<redacted>");
+}
+
+function allowPrivateIps(): boolean {
+  return process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"] === "true";
+}
+
+/**
+ * Validate a URL before fetching: protocol whitelist + (unless overridden)
+ * SSRF guard against private/loopback/link-local addresses.
+ * Throws AttachmentError(reason: "download") on rejection so caller surfaces
+ * a uniform user-facing message.
+ */
+export async function assertSafeUrl(rawUrl: string): Promise<void> {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new AttachmentError(`Invalid attachment URL.`, "download");
+  }
+  if (!ALLOWED_PROTOCOLS.has(url.protocol)) {
+    throw new AttachmentError(`Disallowed URL protocol: ${url.protocol}`, "download");
+  }
+  if (allowPrivateIps()) return;
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (!host) {
+    throw new AttachmentError(`Attachment URL has no host.`, "download");
+  }
+  // If host is already an IP literal, check directly.
+  if (net.isIP(host)) {
+    if (isPrivateIp(host)) {
+      throw new AttachmentError(`Attachment URL resolves to a non-routable address.`, "download");
+    }
+    return;
+  }
+  // DNS lookup — reject if any resolved address is private.
+  let addrs: { address: string }[];
+  try {
+    addrs = await lookup(host, { all: true });
+  } catch (err) {
+    throw new AttachmentError(`DNS lookup failed for ${host}: ${(err as Error).message}`, "download");
+  }
+  if (addrs.length === 0) {
+    throw new AttachmentError(`DNS lookup returned no addresses for ${host}.`, "download");
+  }
+  for (const a of addrs) {
+    if (isPrivateIp(a.address)) {
+      throw new AttachmentError(
+        `Attachment URL ${host} resolves to a non-routable address (${a.address}).`,
+        "download",
+      );
+    }
+  }
 }
 
 interface DownloadOptions {
@@ -100,6 +222,12 @@ interface DownloadOptions {
   maxSize?: number;
   /** Override env whitelist. */
   whitelist?: string[];
+  /** Per-request timeout (ms). Defaults to ATTACHMENT_TIMEOUT_MS or 30s. */
+  timeoutMs?: number;
+  /** Skip SSRF guard (test-only). */
+  skipUrlValidation?: boolean;
+  /** Force SSRF guard even when fetchImpl is set (test-only). */
+  enforceUrlValidation?: boolean;
 }
 
 /**
@@ -113,6 +241,7 @@ export async function downloadAttachment(
   const fetchImpl = opts.fetchImpl ?? fetch;
   const maxSize = opts.maxSize ?? getMaxAttachmentSize();
   const whitelist = opts.whitelist ?? getMimeWhitelist();
+  const timeoutMs = opts.timeoutMs ?? Number(process.env["ATTACHMENT_TIMEOUT_MS"] ?? 30_000);
 
   // Pre-flight: if adapter already told us size/mime, fail fast.
   if (att.size != null && att.size > maxSize) {
@@ -128,90 +257,140 @@ export async function downloadAttachment(
     );
   }
 
+  // SSRF guard — protocol whitelist + private/loopback/link-local rejection.
+  // When a custom fetchImpl is supplied (test path) the URL never hits the network,
+  // so we skip validation unless the caller explicitly opts in.
+  const skipUrl = opts.enforceUrlValidation
+    ? false
+    : (opts.skipUrlValidation ?? !!opts.fetchImpl);
+  if (!skipUrl) {
+    await assertSafeUrl(att.url);
+  }
+
   let res: Response;
+  const controller = new AbortController();
+  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
-    res = await fetchImpl(att.url, { headers: att.headers });
-  } catch (err) {
-    throw new AttachmentError(
-      `Failed to download "${att.filename}": ${(err as Error).message}`,
-      "download",
-    );
-  }
-  if (!res.ok) {
-    throw new AttachmentError(
-      `Failed to download "${att.filename}": HTTP ${res.status}`,
-      "download",
-    );
-  }
-
-  const headerMime = res.headers.get("content-type") ?? undefined;
-  const mimeType = att.mimeType ?? headerMime ?? "application/octet-stream";
-  if (!isMimeAllowed(mimeType, whitelist)) {
-    throw new AttachmentError(
-      `Attachment "${att.filename}" has disallowed type ${mimeType}.`,
-      "mime",
-    );
-  }
-
-  const headerLen = Number(res.headers.get("content-length") ?? "");
-  if (Number.isFinite(headerLen) && headerLen > maxSize) {
-    throw new AttachmentError(
-      `Attachment "${att.filename}" is too large (${formatBytes(headerLen)} > ${formatBytes(maxSize)}).`,
-      "size",
-    );
-  }
-
-  // Resolve target path under the per-session attachment directory
-  const sessionSafe = sanitizeFilename(opts.sessionId);
-  const dir = path.resolve(opts.baseDir, ".attachments", sessionSafe);
-  await mkdir(dir, { recursive: true });
-  const filename = `${Date.now()}-${sanitizeFilename(att.filename)}`;
-  const target = path.resolve(dir, filename);
-  // Defense in depth: target must stay within dir
-  if (!target.startsWith(dir + path.sep)) {
-    throw new AttachmentError(`Resolved path escapes attachment dir: ${target}`, "io");
-  }
-
-  if (!res.body) {
-    throw new AttachmentError(`Empty response body for "${att.filename}".`, "download");
-  }
-
-  // Streaming download with running size guard
-  let written = 0;
-  const sizeGuard = new (await import("node:stream")).Transform({
-    transform(chunk, _enc, cb) {
-      written += chunk.length;
-      if (written > maxSize) {
-        cb(new AttachmentError(
-          `Attachment "${att.filename}" exceeds ${formatBytes(maxSize)} during download.`,
-          "size",
-        ));
-        return;
-      }
-      cb(null, chunk);
-    },
-  });
-
-  const out = createWriteStream(target);
-  try {
-    await pipeline(Readable.fromWeb(res.body as any), sizeGuard, out);
-  } catch (err) {
-    if (err instanceof AttachmentError) throw err;
-    throw new AttachmentError(
-      `Failed to write "${att.filename}": ${(err as Error).message}`,
-      "io",
-    );
-  }
-
-  let size = written;
-  if (size === 0) {
     try {
-      const st = await stat(target);
-      size = st.size;
-    } catch { /* keep written */ }
-  }
+      res = await fetchImpl(att.url, { headers: att.headers, signal: controller.signal });
+    } catch (err) {
+      const msg = (err as Error).message ?? String(err);
+      throw new AttachmentError(
+        `Failed to download "${att.filename}": ${redactToken(msg)}`,
+        "download",
+      );
+    }
+    if (!res.ok) {
+      throw new AttachmentError(
+        `Failed to download "${att.filename}": HTTP ${res.status}`,
+        "download",
+      );
+    }
 
-  return { path: target, filename, mimeType, size };
+    const headerMime = (res.headers.get("content-type") ?? undefined)?.toLowerCase();
+    // QA-5.2: if both adapter and server provide a MIME, BOTH must be in the whitelist.
+    // The adapter's value is no longer trusted to launder a disallowed server payload.
+    if (headerMime && !isMimeAllowed(headerMime, whitelist)) {
+      throw new AttachmentError(
+        `Attachment "${att.filename}" has disallowed type ${headerMime}.`,
+        "mime",
+      );
+    }
+    const mimeType = att.mimeType ?? headerMime ?? "application/octet-stream";
+    if (!isMimeAllowed(mimeType, whitelist)) {
+      throw new AttachmentError(
+        `Attachment "${att.filename}" has disallowed type ${mimeType}.`,
+        "mime",
+      );
+    }
+
+    const headerLen = Number(res.headers.get("content-length") ?? "");
+    if (Number.isFinite(headerLen) && headerLen > maxSize) {
+      throw new AttachmentError(
+        `Attachment "${att.filename}" is too large (${formatBytes(headerLen)} > ${formatBytes(maxSize)}).`,
+        "size",
+      );
+    }
+
+    // Resolve target path under the per-session attachment directory.
+    // Hash the sessionId so distinct keys never share a directory (QA-6.3).
+    const sessionSafe = hashSessionId(opts.sessionId);
+    const dir = path.resolve(opts.baseDir, ".attachments", sessionSafe);
+    await mkdir(dir, { recursive: true });
+    // Random suffix avoids ms-collision when two attachments arrive at the same Date.now() (QA-6.4).
+    const filename = `${Date.now()}-${randomBytes(4).toString("hex")}-${sanitizeFilename(att.filename)}`;
+    const target = path.resolve(dir, filename);
+    // Defense in depth: target must stay within dir
+    if (!target.startsWith(dir + path.sep)) {
+      throw new AttachmentError(`Resolved path escapes attachment dir: ${target}`, "io");
+    }
+
+    if (!res.body) {
+      throw new AttachmentError(`Empty response body for "${att.filename}".`, "download");
+    }
+
+    // Streaming download with running size guard
+    let written = 0;
+    const sizeGuard = new Transform({
+      transform(chunk, _enc, cb) {
+        written += chunk.length;
+        if (written > maxSize) {
+          cb(new AttachmentError(
+            `Attachment "${att.filename}" exceeds ${formatBytes(maxSize)} during download.`,
+            "size",
+          ));
+          return;
+        }
+        cb(null, chunk);
+      },
+    });
+
+    const out = createWriteStream(target);
+    try {
+      await pipeline(Readable.fromWeb(res.body as any), sizeGuard, out);
+    } catch (err) {
+      // Cleanup partial file on any pipeline error
+      await unlink(target).catch(() => {});
+      if (err instanceof AttachmentError) throw err;
+      throw new AttachmentError(
+        `Failed to write "${att.filename}": ${(err as Error).message}`,
+        "io",
+      );
+    }
+
+    // Content-Length integrity check (QA-3.3): if server declared a length, the
+    // streamed body must match exactly. Otherwise an attacker (or a buggy upstream)
+    // can silently truncate a file that we then hand to the AI.
+    if (Number.isFinite(headerLen) && headerLen > 0 && written !== headerLen) {
+      await unlink(target).catch(() => {});
+      throw new AttachmentError(
+        `Attachment "${att.filename}" size mismatch: declared ${headerLen}B, received ${written}B.`,
+        "download",
+      );
+    }
+
+    // Empty body without an explicit Content-Length is almost certainly an error
+    // (Reviewer feedback). If the server actually said "Content-Length: 0" we honor it.
+    if (written === 0 && !(Number.isFinite(headerLen) && headerLen === 0)) {
+      await unlink(target).catch(() => {});
+      throw new AttachmentError(
+        `Empty response body for "${att.filename}".`,
+        "download",
+      );
+    }
+
+    let size = written;
+    if (size === 0) {
+      try {
+        const st = await stat(target);
+        size = st.size;
+      } catch { /* keep written */ }
+    }
+
+    return { path: target, filename, mimeType, size };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** Format the trailer appended to AI prompts. */

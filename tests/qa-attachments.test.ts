@@ -74,12 +74,14 @@ describe("QA: sanitizeFilename adversarial", () => {
     assert.ok(!out.includes(":"));
   });
 
-  it("QA-1.4 Windows reserved names — KNOWN GAP, sanitizer does NOT block CON/PRN/NUL", () => {
-    // Documenting current behaviour: function does not check reserved names.
-    // On a Windows host this could fail to write. Posix tests just observe.
+  it("QA-1.4 Windows reserved names — sanitizer prefixes _ to CON/PRN/NUL etc.", () => {
     const out = sanitizeFilename("CON.txt");
-    // Test asserts current behaviour; flag in report.
-    assert.strictEqual(out, "CON.txt", "sanitizer leaves Windows reserved names intact");
+    assert.strictEqual(out, "_CON.txt", "sanitizer should prefix _ to Windows reserved names");
+    assert.strictEqual(sanitizeFilename("NUL"), "_NUL");
+    assert.strictEqual(sanitizeFilename("prn"), "_prn");
+    assert.strictEqual(sanitizeFilename("com1"), "_com1");
+    // Non-reserved names with similar prefixes are untouched
+    assert.strictEqual(sanitizeFilename("console.txt"), "console.txt");
   });
 
   it("QA-1.5 empty string falls back to 'file'", () => {
@@ -219,26 +221,27 @@ describe("QA: size enforcement (real HTTP)", () => {
     } finally { server.close(); }
   });
 
-  it("QA-3.3 lying content-length (small declared, big body) — KNOWN GAP: fetch trusts declared length, body silently truncated", async () => {
-    // Server declares content-length=50, sends 500 bytes.
-    // undici/Node fetch stops reading at content-length boundary, so the streaming
-    // size guard never observes the full body.  Result: file written = 50 bytes,
-    // download succeeds.  This means a hostile server can DELIVER FEWER bytes than
-    // declared (silent truncation) without any integrity check on our side.
-    const limit = 1024; // generous so streaming guard cannot trip
-    const body = Buffer.alloc(500, 0x43);
+  it("QA-3.3 lying content-length (declared 500, server delivers 50) — detected as truncation", async () => {
+    // Server declares content-length=500 but closes after 50 bytes.
+    // Detection: after streaming completes we assert written === headerLen.
+    // (The inverse — server declares fewer bytes than it actually sends — cannot
+    // be observed at the application layer because undici stops at Content-Length.)
+    const limit = 1024;
+    const body = Buffer.alloc(50, 0x43);
     const { server, url } = await startStaticServer((_req, res) => {
-      res.writeHead(200, { "content-type": "image/png", "content-length": "50" });
-      res.end(body);
+      res.writeHead(200, { "content-type": "image/png", "content-length": "500" });
+      res.write(body);
+      res.destroy();
     });
     try {
       const baseDir = mkTmp();
-      const r = await downloadAttachment(
-        { url: url("/lie.png"), filename: "lie.png", mimeType: "image/png" },
-        { baseDir, sessionId: "s", maxSize: limit },
+      await assert.rejects(
+        downloadAttachment(
+          { url: url("/lie.png"), filename: "lie.png", mimeType: "image/png" },
+          { baseDir, sessionId: "s", maxSize: limit },
+        ),
+        (e) => e instanceof AttachmentError && (e.reason === "download" || e.reason === "io"),
       );
-      // We get 50 bytes (truncated to declared length).  Flag in report.
-      assert.strictEqual(r.size, 50, `expected truncation to declared 50 bytes, got ${r.size}`);
     } finally { server.close(); }
   });
 
@@ -344,41 +347,49 @@ describe("QA: URL adversarial", () => {
     );
   });
 
-  it("QA-4.5 SSRF: 127.0.0.1 NOT blocked — KNOWN GAP (no allowlist)", async () => {
-    // Documents that the implementation does not block private IPs.
-    // Adapter is the trust boundary, but a malicious URL in payload would still hit loopback.
+  it("QA-4.5 SSRF: 127.0.0.1 blocked (non-routable)", async () => {
     const body = Buffer.from("local");
     const { server, url } = await startStaticServer((_req, res) => {
       res.writeHead(200, { "content-type": "image/png" }); res.end(body);
     });
+    const old = process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"];
+    delete process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"];
     try {
       const baseDir = mkTmp();
-      const r = await downloadAttachment(
-        { url: url("/internal.png"), filename: "i.png", mimeType: "image/png" },
-        { baseDir, sessionId: "s" },
+      await assert.rejects(
+        downloadAttachment(
+          { url: url("/internal.png"), filename: "i.png", mimeType: "image/png" },
+          { baseDir, sessionId: "s", enforceUrlValidation: true },
+        ),
+        (e) => e instanceof AttachmentError && e.reason === "download" && /non-routable|private|loopback/i.test(e.message),
       );
-      assert.strictEqual(r.size, body.length);
-      // Test passes — but this is flagged as a security gap in the report.
-    } finally { server.close(); }
+    } finally {
+      server.close();
+      if (old != null) process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"] = old;
+    }
   });
 
-  it("QA-4.6 SSRF: 169.254.169.254 (cloud metadata) — fetch attempted, KNOWN GAP", async () => {
-    // We don't actually contact metadata. Just confirm there's no scheme/host validation.
-    // Use mock fetch to assert no pre-flight host check exists.
+  it("QA-4.6 SSRF: 169.254.169.254 (cloud metadata) rejected before fetch", async () => {
     let urlSeen = "";
     const mock = (async (u: any) => {
       urlSeen = u;
       throw new Error("network blocked by test");
     }) as unknown as typeof fetch;
     const baseDir = mkTmp();
-    await assert.rejects(
-      downloadAttachment(
-        { url: "http://169.254.169.254/latest/meta-data", filename: "meta", mimeType: "image/png" },
-        { baseDir, sessionId: "s", fetchImpl: mock },
-      ),
-    );
-    assert.strictEqual(urlSeen, "http://169.254.169.254/latest/meta-data",
-      "fetch was invoked with metadata URL — no host allowlist (gap).");
+    const old = process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"];
+    delete process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"];
+    try {
+      await assert.rejects(
+        downloadAttachment(
+          { url: "http://169.254.169.254/latest/meta-data", filename: "meta", mimeType: "image/png" },
+          { baseDir, sessionId: "s", fetchImpl: mock, enforceUrlValidation: true },
+        ),
+        (e) => e instanceof AttachmentError && e.reason === "download",
+      );
+      assert.strictEqual(urlSeen, "", "fetch must NOT be invoked when SSRF guard rejects the URL");
+    } finally {
+      if (old != null) process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"] = old;
+    }
   });
 
   it("QA-4.7 ultra-long URL passed through (no length cap)", async () => {
@@ -420,21 +431,22 @@ describe("QA: MIME spoofing in download path", () => {
     } finally { server.close(); }
   });
 
-  it("QA-5.2 adapter declares image/png, server returns video/mp4 → adapter MIME wins (passes), KNOWN BEHAVIOUR", async () => {
-    // Note: code uses `att.mimeType ?? headerMime`. So adapter trust is sticky.
-    // This is documented but worth flagging: a misbehaving adapter can lie.
+  it("QA-5.2 adapter declares image/png, server returns video/mp4 — server MIME re-checked, REJECT", async () => {
+    // After fix: server's declared content-type must also be in the whitelist;
+    // adapter trust no longer launders disallowed payloads.
     const body = Buffer.from("xx");
     const { server, url } = await startStaticServer((_req, res) => {
       res.writeHead(200, { "content-type": "video/mp4" }); res.end(body);
     });
     try {
       const baseDir = mkTmp();
-      const r = await downloadAttachment(
-        { url: url("/x"), filename: "x.png", mimeType: "image/png" },
-        { baseDir, sessionId: "s" },
+      await assert.rejects(
+        downloadAttachment(
+          { url: url("/x"), filename: "x.png", mimeType: "image/png" },
+          { baseDir, sessionId: "s" },
+        ),
+        (e) => e instanceof AttachmentError && e.reason === "mime",
       );
-      // Adapter said image/png so we never re-check header MIME → passes.
-      assert.strictEqual(r.mimeType, "image/png");
     } finally { server.close(); }
   });
 
@@ -484,7 +496,7 @@ describe("QA: per-session path isolation", () => {
     assert.ok(r.path.startsWith(path.join(baseDir, ".attachments")));
   });
 
-  it("QA-6.3 COLLISION RISK — sessionIds 'a/b' and 'a_b' sanitize to same dir (KNOWN GAP)", async () => {
+  it("QA-6.3 distinct sessionIds 'a/b' and 'a_b' — hashed dirs no longer collide (fixed)", async () => {
     const baseDir = mkTmp();
     const f = makeFetch({ contentType: "image/png", body: Buffer.from("x") });
     const r1 = await downloadAttachment(
@@ -495,25 +507,17 @@ describe("QA: per-session path isolation", () => {
       { url: "x", filename: "f.png", mimeType: "image/png" },
       { baseDir, sessionId: "a_b", fetchImpl: f },
     );
-    // Both end up in same parent dir because '/' → '_' in sanitizeFilename.
-    assert.strictEqual(path.dirname(r1.path), path.dirname(r2.path));
-    // Test passes; flagged in report — sessionId collision via sanitization.
+    assert.notStrictEqual(path.dirname(r1.path), path.dirname(r2.path));
   });
 
-  it("QA-6.4 filename collision within same ms — Date.now()-name suffix", async () => {
+  it("QA-6.4 filename collision within same ms — random suffix prevents overwrite (fixed)", async () => {
     const baseDir = mkTmp();
     const f = makeFetch({ contentType: "image/png", body: Buffer.from("x") });
     const opts = { baseDir, sessionId: "s", fetchImpl: f };
-    // Run sequentially but quickly; if ms-collision occurs second write overwrites first.
     const r1 = await downloadAttachment({ url: "x", filename: "dup.png", mimeType: "image/png" }, opts);
     const r2 = await downloadAttachment({ url: "x", filename: "dup.png", mimeType: "image/png" }, opts);
-    // Either equal (same ms — overwrite) or distinct. If equal, file isn't lost but written twice.
-    if (r1.path === r2.path) {
-      // Document but don't fail — known limitation when 2 attachments arrive same ms.
-      assert.ok(existsSync(r1.path));
-    } else {
-      assert.ok(existsSync(r1.path) && existsSync(r2.path));
-    }
+    assert.notStrictEqual(r1.path, r2.path);
+    assert.ok(existsSync(r1.path) && existsSync(r2.path));
   });
 });
 
