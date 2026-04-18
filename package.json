@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
-    "test": "ATTACHMENT_ALLOW_PRIVATE_IPS=true tsx --test tests/smoke.test.ts tests/router.test.ts tests/adapters.test.ts tests/routing.test.ts tests/features.test.ts tests/attachments.test.ts tests/qa-attachments.test.ts tests/ssrf.test.ts tests/telegram-token.test.ts tests/router-attachments.test.ts tests/attachments-gc.test.ts tests/qa-r2-attachments.test.ts tests/r3-fixes.test.ts"
+    "test": "ATTACHMENT_ALLOW_PRIVATE_IPS=true tsx --test tests/smoke.test.ts tests/router.test.ts tests/adapters.test.ts tests/routing.test.ts tests/features.test.ts tests/attachments.test.ts tests/qa-attachments.test.ts tests/ssrf.test.ts tests/telegram-token.test.ts tests/router-attachments.test.ts tests/attachments-gc.test.ts tests/qa-r2-attachments.test.ts tests/r3-fixes.test.ts tests/qa-r3-attachments.test.ts"
   },
   "dependencies": {
     "@slack/bolt": "^4.7.0",
