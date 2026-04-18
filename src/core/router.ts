@@ -10,6 +10,7 @@ import {
   formatAttachmentTrailer,
   type DownloadedAttachment,
 } from "../utils/attachments.js";
+import { startAttachmentGc } from "../utils/attachments-gc.js";
 import { randomUUID } from "node:crypto";
 
 const EDIT_THROTTLE_MS = 1500; // S2: throttle edits
@@ -25,6 +26,8 @@ export class Router {
   private defaultCwd: string;
   // R10: per-user rate limit — sliding window of timestamps
   private rateLimits = new Map<string, number[]>();
+  // P1 (R1): periodic GC of .attachments/ files older than ATTACHMENT_TTL_HOURS
+  private stopAttachmentGc: (() => void) | null = null;
 
   constructor(opts: { defaultCwd: string }) {
     this.defaultCwd = opts.defaultCwd;
@@ -396,6 +399,8 @@ export class Router {
     }
     const aliases = this.getAIAliases();
     console.log(`[router] AI adapters: ${aliases.join(", ")} (default: ${this.defaultAlias})`);
+    // P1 (R1): start periodic .attachments/ sweep so old downloads don't fill disk
+    this.stopAttachmentGc = startAttachmentGc({ baseDir: this.defaultCwd });
     console.log(`[router] Gateway started`);
   }
 
@@ -419,6 +424,7 @@ export class Router {
     }
 
     this.sessions.destroy();
+    if (this.stopAttachmentGc) { this.stopAttachmentGc(); this.stopAttachmentGc = null; }
     console.log(`[router] Gateway stopped`);
   }
 
