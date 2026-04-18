@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, readdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import type { Session } from "./types.js";
+import type { Session, InboundAttachment } from "./types.js";
 
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000; // M6: 24 hours
 const MAX_QUEUE = 20;           // S-2: max queued messages per session
@@ -10,7 +10,7 @@ const MAX_QUEUE_CHARS = 50_000; // S-2: max total chars in queue
 
 export class SessionManager {
   private sessions = new Map<string, Session>();
-  private queues = new Map<string, Array<{ text: string; replyToId?: string; threadId?: string }>>();
+  private queues = new Map<string, Array<{ text: string; replyToId?: string; threadId?: string; attachments?: InboundAttachment[] }>>();
   private overflow = new Set<string>();          // S-2: tracks sessions that hit queue limit
   private baseCwd: string;
   private ttlMs: number;
@@ -116,7 +116,11 @@ export class SessionManager {
 
   // S1: per-session FIFO queue
   // S-2: returns false if queue is full (overflow)
-  enqueue(key: string, text: string, meta?: { replyToId?: string; threadId?: string }): boolean {
+  enqueue(
+    key: string,
+    text: string,
+    meta?: { replyToId?: string; threadId?: string; attachments?: InboundAttachment[] },
+  ): boolean {
     let q = this.queues.get(key);
     if (!q) { q = []; this.queues.set(key, q); }
 
@@ -125,13 +129,22 @@ export class SessionManager {
       this.overflow.add(key);
       return false;
     }
-    q.push({ text, replyToId: meta?.replyToId, threadId: meta?.threadId });
+    // Snapshot attachments so the queued entry is independent of the caller's array.
+    const attSnapshot = meta?.attachments ? meta.attachments.map((a) => ({ ...a })) : undefined;
+    q.push({
+      text,
+      replyToId: meta?.replyToId,
+      threadId: meta?.threadId,
+      attachments: attSnapshot,
+    });
     return true;
   }
 
   /** Drain all pending messages into a single combined prompt, or undefined if empty.
-   *  M-1: returns metadata from the last queued message for correct replyToId/threadId. */
-  drain(key: string): { text: string; replyToId?: string; threadId?: string } | undefined {
+   *  M-1: returns metadata from the last queued message for correct replyToId/threadId.
+   *  QA-7.2: returns the union of all queued attachments so the router can download
+   *  every attachment that arrived while busy (none silently dropped). */
+  drain(key: string): { text: string; replyToId?: string; threadId?: string; attachments?: InboundAttachment[] } | undefined {
     const q = this.queues.get(key);
     if (!q || q.length === 0) return undefined;
 
@@ -146,8 +159,17 @@ export class SessionManager {
       combined = `The user sent ${q.length} messages while I was busy.${hadOverflow ? " Some messages were dropped due to queue overflow." : ""} Please address all:\n\n` +
         q.map((item, i) => `### Message ${i + 1}\n${item.text}`).join("\n\n");
     }
+    const allAttachments: InboundAttachment[] = [];
+    for (const item of q) {
+      if (item.attachments) allAttachments.push(...item.attachments);
+    }
     q.length = 0;
-    return { text: combined, replyToId: last.replyToId, threadId: last.threadId };
+    return {
+      text: combined,
+      replyToId: last.replyToId,
+      threadId: last.threadId,
+      attachments: allAttachments.length > 0 ? allAttachments : undefined,
+    };
   }
 
   hasPending(key: string): boolean {

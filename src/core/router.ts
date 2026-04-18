@@ -1,3 +1,4 @@
+import { unlink } from "node:fs/promises";
 import type { AIAdapter, IMAdapter, InboundMessage, SendResult } from "./types.js";
 import { SessionManager } from "./session.js";
 import { splitMessage } from "../utils/messages.js";
@@ -107,6 +108,7 @@ export class Router {
       return;
     }
     timestamps.push(now);
+    // P2 may have deleted the empty array above; re-attach so the new timestamp counts.
     if (!this.rateLimits.has(userKey)) this.rateLimits.set(userKey, timestamps);
 
     try {
@@ -115,6 +117,7 @@ export class Router {
         const accepted = this.sessions.enqueue(sessionKey, msg.text, {
           replyToId: msg.replyToId,
           threadId: msg.threadId,
+          attachments: msg.attachments,
         });
         await im.sendMessage({
           chatId,
@@ -193,7 +196,6 @@ export class Router {
       let downloaded: DownloadedAttachment[] = [];
       if (msg.attachments && msg.attachments.length > 0) {
         try {
-          downloaded = [];
           for (const att of msg.attachments) {
             const d = await downloadAttachment(att, {
               baseDir: this.defaultCwd,
@@ -202,6 +204,12 @@ export class Router {
             downloaded.push(d);
           }
         } catch (err) {
+          // R1-critical: clean up files we already downloaded before the failure
+          // so a partial multi-attachment batch never leaks to disk.
+          await Promise.all(
+            downloaded.map((d) => unlink(d.path).catch(() => {})),
+          );
+          downloaded = [];
           const reason = err instanceof AttachmentError ? err.message : `Attachment error: ${(err as Error).message}`;
           await im.sendMessage({
             chatId,
@@ -209,7 +217,9 @@ export class Router {
             threadId: msg.threadId,
             replyToId: msg.replyToId,
           }).catch(() => {});
-          return true;
+          // R1-critical: return false so the reaction strip shows ❌ (matching the
+          // user-visible failure) instead of ✅.
+          return false;
         }
       }
 
@@ -331,11 +341,13 @@ export class Router {
           break;
         }
         // M-1: use last queued message's replyToId/threadId
+        // QA-7.2: include queued attachments so they don't get silently dropped.
         const syntheticMsg: InboundMessage = {
           ...msg,
           text: queued.text,
           replyToId: queued.replyToId,
           threadId: queued.threadId,
+          attachments: queued.attachments,
         };
         try {
           await this.processMessage(syntheticMsg, im);
