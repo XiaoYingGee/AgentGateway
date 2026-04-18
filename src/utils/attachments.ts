@@ -384,7 +384,12 @@ export async function downloadAttachment(
       );
     }
 
-    const headerLen = Number(res.headers.get("content-length") ?? "");
+    // R3 NR-1: distinguish "header absent" (NaN, length unknown) from
+    // "Content-Length: 0" (explicit zero). `Number("") === 0` would conflate
+    // them and let an empty chunked-encoded response slip through the empty-
+    // body guard below.
+    const headerLenRaw = res.headers.get("content-length");
+    const headerLen = headerLenRaw == null ? NaN : Number(headerLenRaw);
     if (Number.isFinite(headerLen) && headerLen > maxSize) {
       throw new AttachmentError(
         `Attachment "${att.filename}" is too large (${formatBytes(headerLen)} > ${formatBytes(maxSize)}).`,

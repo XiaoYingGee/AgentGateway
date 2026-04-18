@@ -766,38 +766,22 @@ describe("QA-R2 new-hunt: filename-based collision via random suffix entropy", (
 });
 
 describe("QA-R2 new-hunt: response.body empty edge — Number(\"\") returns 0 trips the empty-body guard", () => {
-  it("[BROKEN] 200 with no body and NO content-length header is silently accepted as size=0", async () => {
-    // BACKGROUND
-    // After streaming completes, the empty-body fallback is:
-    //   if (written === 0 && !(Number.isFinite(headerLen) && headerLen === 0)) reject;
-    // BUT `headerLen = Number(res.headers.get("content-length") ?? "")` returns
-    // 0 when the header is *absent* (Number("") === 0, isFinite(0) === true),
-    // not NaN as the author likely expected. So a 200 with no body AND no
-    // Content-Length header skips the reject and produces a 0-byte file.
-    //
-    // IMPACT: LOW–MEDIUM — a buggy origin can deliver an empty payload that the
-    // gateway hands to the AI as a legitimate (empty) attachment. The AI may
-    // then hallucinate over an empty file.
-    //
-    // FIX: use `const headerLenRaw = res.headers.get("content-length");` and
-    //      `const headerLen = headerLenRaw == null ? NaN : Number(headerLenRaw);`
-    //      That way a missing header is properly NaN, fails Number.isFinite,
-    //      and the empty-body fallback fires.
+  it("200 with no body and NO content-length header is rejected as empty (R3 NR-1)", async () => {
+    // R3 NR-1: distinguish missing CL header (NaN) from `Content-Length: 0`.
     const { server, url } = await startStaticServer((_req, res) => {
-      // Chunked encoding implied; no Content-Length header at all
       res.writeHead(200, { "content-type": "image/png" });
       res.end();
     });
     try {
       await withOverride(async () => {
         const baseDir = mkTmp();
-        const out = await downloadAttachment(
-          { url: url("/x.png"), filename: "x.png", mimeType: "image/png" },
-          { baseDir, sessionId: "s", enforceUrlValidation: false },
+        await assert.rejects(
+          () => downloadAttachment(
+            { url: url("/x.png"), filename: "x.png", mimeType: "image/png" },
+            { baseDir, sessionId: "s", enforceUrlValidation: false },
+          ),
+          (e: any) => e instanceof AttachmentError && e.reason === "download",
         );
-        // Currently accepted as a legitimate empty attachment. When the fix
-        // lands, flip to assert.rejects(...).
-        assert.strictEqual(out.size, 0, "silent acceptance of empty body");
       });
     } finally { server.close(); }
   });
