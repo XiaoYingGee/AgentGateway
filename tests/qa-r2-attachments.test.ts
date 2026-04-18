@@ -482,33 +482,40 @@ describe("QA-R2 P0-4 Queue: 3 messages × 3 attachments — every file actually 
 // ============================================================================
 
 describe("QA-R2 P1-7 GC: active-session awareness", () => {
-  it("[BROKEN] GC deletes files older than TTL even when the session is still active", async () => {
-    // BACKGROUND
-    // sweepAttachments() walks .attachments/<session>/ and unlinks files whose
-    // mtime is older than TTL. It has zero awareness of which sessions are
-    // currently active. A long conversation that keeps the same sessionKey for
-    // > TTL hours will silently lose its attachments mid-conversation when
-    // the AI is asked to reason about an earlier image.
-    //
-    // IMPACT: MEDIUM — operators who set ATTACHMENT_TTL_HOURS=1 (or similar
-    // tight value) and have a multi-turn conversation will see attachments
-    // disappear. Default TTL of 24h limits the blast radius but doesn't fix
-    // the root cause.
-    //
-    // FIX: Either (a) `touch` the file on every reference (downloads or AI
-    // prompt build), so mtime tracks last-use and idle GC works as intended;
-    // or (b) track active session keys in Router and skip those dirs in
-    // sweepAttachments.
+  it("GC deletes files older than TTL when the session is NOT in the active set (control)", async () => {
     const baseDir = mkTmp();
-    const sess = path.join(baseDir, ".attachments", "active-session-id-1234");
+    const sess = path.join(baseDir, ".attachments", "inactive-session-id");
     mkdirSync(sess, { recursive: true });
     const f = path.join(sess, "1234-aaaa-active.png");
     writeFileSync(f, "active session data");
     const oldTime = (Date.now() - 2 * 3600 * 1000) / 1000; // 2h old mtime
     utimesSync(f, oldTime, oldTime);
     const removed = await sweepAttachments(baseDir, 3600 * 1000); // TTL 1h
-    assert.strictEqual(removed, 1, "current behaviour: file deleted regardless of session liveness");
-    assert.strictEqual(existsSync(f), false, "file is gone — flip this when GC respects active sessions");
+    assert.strictEqual(removed, 1, "file deleted because no session is active");
+    assert.strictEqual(existsSync(f), false);
+  });
+
+  it("GC SKIPS active session dirs even when files exceed TTL (R3 P0-3)", async () => {
+    // The Router maintains a Set<sessionDirHash> of currently-busy sessions.
+    // sweepAttachments now accepts that set and refuses to touch any file
+    // inside an active dir, regardless of mtime.
+    const baseDir = mkTmp();
+    const activeDir = "active-session-hash-r3";
+    const sess = path.join(baseDir, ".attachments", activeDir);
+    mkdirSync(sess, { recursive: true });
+    const f = path.join(sess, "5678-bbbb-keep.png");
+    writeFileSync(f, "in-flight conversation data");
+    const oldTime = (Date.now() - 5 * 3600 * 1000) / 1000;
+    utimesSync(f, oldTime, oldTime);
+    const active = new Set<string>([activeDir]);
+    const removed = await sweepAttachments(baseDir, 3600 * 1000, active);
+    assert.strictEqual(removed, 0, "active session dir must be skipped entirely");
+    assert.strictEqual(existsSync(f), true,
+      "file in active session must survive the sweep");
+    // After the session goes idle, next sweep removes it.
+    const removed2 = await sweepAttachments(baseDir, 3600 * 1000, new Set());
+    assert.strictEqual(removed2, 1);
+    assert.strictEqual(existsSync(f), false);
   });
 
   it("uses mtime, not atime — atime updates do NOT extend the TTL window", async () => {

@@ -8,6 +8,7 @@ import {
   AttachmentError,
   downloadAttachment,
   formatAttachmentTrailer,
+  hashSessionId,
   type DownloadedAttachment,
 } from "../utils/attachments.js";
 import { startAttachmentGc } from "../utils/attachments-gc.js";
@@ -28,6 +29,11 @@ export class Router {
   private rateLimits = new Map<string, number[]>();
   // P1 (R1): periodic GC of .attachments/ files older than ATTACHMENT_TTL_HOURS
   private stopAttachmentGc: (() => void) | null = null;
+  // R3 P0-3: track session-dir hashes that are currently active so GC skips them.
+  // A session is "active" from the time we start processing one of its messages
+  // until processMessage's finally clears the marker. Set keys are the hashed
+  // dir name (matches `hashSessionId`) so the GC sweep walks the same key.
+  private activeSessionDirs = new Set<string>();
 
   constructor(opts: { defaultCwd: string }) {
     this.defaultCwd = opts.defaultCwd;
@@ -183,6 +189,11 @@ export class Router {
     }
 
     let succeeded = true;
+    // R3 P0-3: mark this session-dir active so the GC sweep skips it for the
+    // duration of the turn. Cleared in the finally block below so an idle
+    // session becomes eligible for sweep again on the next tick.
+    const sessionDirKey = hashSessionId(sessionKey);
+    this.activeSessionDirs.add(sessionDirKey);
     try {
       if (switched) {
         await im.sendMessage({
@@ -336,6 +347,8 @@ export class Router {
       }).catch(() => {}); // don't let error reporting crash
       succeeded = false;
     } finally {
+      // R3 P0-3: release the active marker for this session.
+      this.activeSessionDirs.delete(sessionDirKey);
       // R1: atomic drain loop — stay busy while queue has messages
       while (true) {
         const queued = this.sessions.drain(sessionKey);
@@ -400,7 +413,12 @@ export class Router {
     const aliases = this.getAIAliases();
     console.log(`[router] AI adapters: ${aliases.join(", ")} (default: ${this.defaultAlias})`);
     // P1 (R1): start periodic .attachments/ sweep so old downloads don't fill disk
-    this.stopAttachmentGc = startAttachmentGc({ baseDir: this.defaultCwd });
+    // R3 P0-3: feed the sweep our active-session set so live conversations don't
+    // lose their attachments mid-turn.
+    this.stopAttachmentGc = startAttachmentGc({
+      baseDir: this.defaultCwd,
+      getActiveSessionDirs: () => this.activeSessionDirs,
+    });
     console.log(`[router] Gateway started`);
   }
 
