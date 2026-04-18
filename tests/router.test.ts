@@ -1,5 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { Router } from "../src/core/router.ts";
 import type { AIAdapter, IMAdapter, InboundMessage, SendResult } from "../src/core/types.ts";
 
@@ -215,6 +219,74 @@ describe("Router integration", () => {
 
     // After prune+push, entry should still exist (with 1 new timestamp)
     assert.ok(rateLimits.has("test:ephemeral-user"), "should still have entry after new msg");
+
+    router["sessions"].destroy();
+  });
+
+  // Attachments: router downloads and appends paths to AI prompt
+  it("downloads attachments and appends paths to the AI prompt", async () => {
+    // Tiny HTTP server serving a fake image
+    const payload = Buffer.from("fake-png-bytes");
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "image/png", "content-length": String(payload.length) });
+      res.end(payload);
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    const url = `http://127.0.0.1:${addr.port}/cat.png`;
+
+    const baseDir = mkdtempSync(path.join(tmpdir(), "agw-router-att-"));
+    const router = new Router({ defaultCwd: baseDir });
+    const im = createMockIM();
+    let capturedPrompt = "";
+    const ai: AIAdapter = {
+      name: "capture-ai",
+      supportsResume: false,
+      async invoke(params) {
+        capturedPrompt = params.prompt;
+        return { text: "ok", exitCode: 0 };
+      },
+    };
+    router.registerIM(im);
+    router.registerAI(ai);
+
+    await im.inject(makeMsg({
+      text: "look at this",
+      attachments: [{ url, filename: "cat.png", mimeType: "image/png", size: payload.length }],
+    }));
+
+    server.close();
+
+    assert.ok(capturedPrompt.startsWith("look at this"), `prompt should start with user text, got: ${capturedPrompt}`);
+    assert.ok(capturedPrompt.includes("[Attachments]"), "prompt should include attachments trailer");
+    assert.ok(capturedPrompt.includes("image/png"), "prompt should include MIME type");
+    assert.ok(capturedPrompt.includes(path.join(baseDir, ".attachments")), "prompt should include resolved local path");
+
+    router["sessions"].destroy();
+  });
+
+  it("rejects disallowed attachment MIME and does not invoke AI", async () => {
+    const baseDir = mkdtempSync(path.join(tmpdir(), "agw-router-att-rej-"));
+    const router = new Router({ defaultCwd: baseDir });
+    const im = createMockIM();
+    let aiCalls = 0;
+    const ai: AIAdapter = {
+      name: "never-ai",
+      supportsResume: false,
+      async invoke() { aiCalls++; return { text: "", exitCode: 0 }; },
+    };
+    router.registerIM(im);
+    router.registerAI(ai);
+
+    await im.inject(makeMsg({
+      text: "hi",
+      attachments: [{ url: "http://127.0.0.1:1/x.zip", filename: "x.zip", mimeType: "application/zip", size: 10 }],
+    }));
+
+    assert.strictEqual(aiCalls, 0, "AI must not be invoked when attachment is rejected");
+    const errMsg = im.sent.find((s) => s.text.startsWith("❌"));
+    assert.ok(errMsg, `expected ❌ error message, sent: ${JSON.stringify(im.sent)}`);
+    assert.ok(errMsg!.text.includes("application/zip"));
 
     router["sessions"].destroy();
   });
