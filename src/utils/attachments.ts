@@ -223,7 +223,11 @@ export async function resolveTelegramFileUrl(
     if (!filePath || typeof filePath !== "string") {
       throw new AttachmentError(`Telegram getFile missing file_path.`, "download");
     }
-    return `https://api.telegram.org/file/bot${token}/${filePath}`;
+    // R3: Telegram is trusted, but encode the filePath component for hygiene
+    // so a stray `..`, scheme, or whitespace in `file_path` cannot break the URL.
+    // We use encodeURI (not encodeURIComponent) because filePath may legitimately
+    // contain `/` separators between subdirectory segments.
+    return `https://api.telegram.org/file/bot${token}/${encodeURI(filePath)}`;
   } finally {
     clearTimeout(timer);
   }
