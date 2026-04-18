@@ -189,9 +189,10 @@ export class Router {
     }
 
     let succeeded = true;
-    // R3 P0-3: mark this session-dir active so the GC sweep skips it for the
-    // duration of the turn. Cleared in the finally block below so an idle
-    // session becomes eligible for sweep again on the next tick.
+    // R3 P0-3 / P1-6: hoist downloaded + active-dir + aiInvokeFailed so the
+    // finally block can clean up no matter where in the try we threw.
+    let downloaded: DownloadedAttachment[] = [];
+    let aiInvokeFailed = false;
     const sessionDirKey = hashSessionId(sessionKey);
     this.activeSessionDirs.add(sessionDirKey);
     try {
@@ -207,7 +208,6 @@ export class Router {
 
       // Attachments: download (with size + MIME guards) before invoking AI.
       // Failures are reported back to the user and short-circuit the turn.
-      let downloaded: DownloadedAttachment[] = [];
       if (msg.attachments && msg.attachments.length > 0) {
         try {
           for (const att of msg.attachments) {
@@ -327,6 +327,9 @@ export class Router {
         }
       }
     } catch (err) {
+      // R3 P1-6: mark the AI/send path as having failed so the finally block
+      // can clean up `downloaded` files instead of leaving them for the GC.
+      aiInvokeFailed = true;
       const errMsg = err instanceof Error ? err.message : String(err);
       // R7: sanitize error — ref id for user, full details in logs only
       const refId = randomUUID().slice(0, 8);
@@ -347,6 +350,15 @@ export class Router {
       }).catch(() => {}); // don't let error reporting crash
       succeeded = false;
     } finally {
+      // R3 P1-6: AI invoke / send failed → unlink the downloads for this turn so
+      // they don't sit on disk waiting for the 24h GC. Only fires when the
+      // failure is in the AI/send path (attachment-download failures already
+      // cleaned up above before returning false).
+      if (aiInvokeFailed && downloaded.length > 0) {
+        await Promise.all(
+          downloaded.map((d) => unlink(d.path).catch(() => {})),
+        );
+      }
       // R3 P0-3: release the active marker for this session.
       this.activeSessionDirs.delete(sessionDirKey);
       // R1: atomic drain loop — stay busy while queue has messages
