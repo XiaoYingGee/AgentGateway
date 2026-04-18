@@ -4,6 +4,14 @@ A universal AI CLI gateway that routes messages between instant messaging platfo
 
 Connect your Discord or Telegram bot to Claude Code, Gemini, or any future AI CLI — with session isolation, message queuing, streaming edits, and production-grade error handling out of the box.
 
+## Features
+
+- Pluggable IM adapters (Discord, Telegram) and AI adapters (Claude Code, Gemini)
+- Per-user session isolation with TTL cleanup and message queueing
+- Streaming responses with throttled message edits
+- Rate limiting (10 messages / user / minute) and fail-closed user whitelisting
+- **Multi-modal attachments** — send images / documents / voice notes from Discord or Telegram and the gateway downloads them locally, then appends absolute paths to the AI prompt under an `[Attachments]` trailer so the AI CLI can `read` them. Configurable size limit (`MAX_ATTACHMENT_SIZE`, default 25 MB) and MIME whitelist (`ATTACHMENT_MIME_WHITELIST`, default `image/*, text/*, application/pdf, application/json`).
+
 ## Architecture
 
 ```
@@ -71,8 +79,8 @@ AI_DEFAULT=claude-code            # optional, first in list is default
 
 | IM Platform | Features |
 |-------------|----------|
-| **Discord** | Threads, reactions, message editing (streaming), DM & guild channels |
-| **Telegram** | Topics/threads, message editing (streaming), private & group chats |
+| **Discord** | Threads, reactions, message editing (streaming), DM & guild channels, image / file attachments |
+| **Telegram** | Topics/threads, message editing (streaming), private & group chats, photo / document / voice attachments |
 | **Slack** | Threads (thread_ts), message editing (chat.update), DM & channel mentions, Socket Mode |
 
 | AI Backend | Session Resume | Streaming |

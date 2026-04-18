@@ -1,5 +1,17 @@
 # Changelog — AgentGateway v2 Audit Fixes
 
+## Unreleased
+
+### Multi-modal attachments
+
+- New: `IncomingMessage.attachments?: InboundAttachment[]` on `src/core/types.ts`
+- New module `src/utils/attachments.ts` — streaming download with size cap (`MAX_ATTACHMENT_SIZE`, default 25 MB) and fail-closed MIME whitelist (`ATTACHMENT_MIME_WHITELIST`, default `image/,text/,application/pdf,application/json`). Files land under `${DEFAULT_CWD}/.attachments/<sessionId>/<timestamp>-<safe-filename>` with sanitized filenames and path-traversal defenses.
+- Discord adapter parses `message.attachments` (Collection) into `InboundAttachment[]`.
+- Telegram adapter handles `photo`, `document`, and `voice` messages, resolving file URLs via `bot.api.getFile`.
+- Router downloads attachments before invoking the AI; failures (size / MIME / network) reply with `❌ <reason>` and skip the AI call entirely. On success, an `\n\n[Attachments]\n- <abs-path> (<mime>, <size>)` trailer is appended to the prompt so the AI CLI can `read` the files.
+- Tests: new `tests/attachments.test.ts` covering sanitization, MIME enforcement, size guards, and download paths; new router integration tests for the attachment pipeline (success path + rejected MIME).
+- Docs: README Features section + IM table updated; `.env.example` gains the two new variables.
+
 ## Post-launch Hardening (Round 5)
 
 ### P1: Startup orphan session cleanup
