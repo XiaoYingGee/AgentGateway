@@ -3,6 +3,12 @@ import { SessionManager } from "./session.js";
 import { splitMessage } from "../utils/messages.js";
 import { parseAIPrefix } from "../utils/prefix.js";
 import { parseCommand } from "../utils/command.js";
+import {
+  AttachmentError,
+  downloadAttachment,
+  formatAttachmentTrailer,
+  type DownloadedAttachment,
+} from "../utils/attachments.js";
 import { randomUUID } from "node:crypto";
 
 const EDIT_THROTTLE_MS = 1500; // S2: throttle edits
@@ -182,6 +188,33 @@ export class Router {
 
       await im.sendTyping?.(chatId);
 
+      // Attachments: download (with size + MIME guards) before invoking AI.
+      // Failures are reported back to the user and short-circuit the turn.
+      let downloaded: DownloadedAttachment[] = [];
+      if (msg.attachments && msg.attachments.length > 0) {
+        try {
+          downloaded = [];
+          for (const att of msg.attachments) {
+            const d = await downloadAttachment(att, {
+              baseDir: this.defaultCwd,
+              sessionId: sessionKey,
+            });
+            downloaded.push(d);
+          }
+        } catch (err) {
+          const reason = err instanceof AttachmentError ? err.message : `Attachment error: ${(err as Error).message}`;
+          await im.sendMessage({
+            chatId,
+            text: `❌ ${reason}`,
+            threadId: msg.threadId,
+            replyToId: msg.replyToId,
+          }).catch(() => {});
+          return true;
+        }
+      }
+
+      const promptWithAttachments = prompt + formatAttachmentTrailer(downloaded);
+
       // S2: send a placeholder message if editMessage is supported
       let placeholderResult: SendResult | undefined;
       let lastEditAt = 0;
@@ -202,7 +235,7 @@ export class Router {
       const invokeCwd = session.cwd ?? this.defaultCwd;
 
       const result = await aiAdapter.invoke({
-        prompt,
+        prompt: promptWithAttachments,
         sessionId: session.resumeIds[alias],
         cwd: invokeCwd,
         onChunk: (text) => {
