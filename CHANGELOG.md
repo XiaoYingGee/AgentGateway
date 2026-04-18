@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### R3 — SSRF + GC + cleanup follow-ups (Reviewer R2 + QA R2 must-fixes)
+
+Response to `REVIEW-R2.md` (1 HIGH + 4 LOW/MED) and `QA-R2.md`
+(2 new SSRF bypasses + GC active-session bug + 2 semantic notes).
+Detailed map in `FIX-R3.md`.
+
+**Critical (P0)**
+- SSRF Bypass A — `downloadAttachment` now uses `redirect: "manual"` and re-runs `assertSafeUrl` on the `Location` header for every hop; redirect chains are capped at `MAX_REDIRECT_HOPS=3` and surface as `AttachmentError(reason: "redirect_loop")` on overflow. A public CDN URL that 302s to `127.0.0.1`, AWS metadata, or a private IP is now rejected before the second fetch.
+- SSRF Bypass B — `isPrivateIp` decodes IPv4-mapped IPv6 hostnames in BOTH the dotted (`::ffff:127.0.0.1`) and hex-tail (`::ffff:7f00:1`, `0:0:0:0:0:ffff:7f00:1`) forms produced by the WHATWG URL parser. Loopback / RFC1918 / link-local / cloud-metadata addresses are no longer reachable through IPv4-mapped IPv6 syntax.
+- GC active-session awareness — `sweepAttachments(baseDir, ttlMs, activeSessionDirs?)` now skips dirs in the active set unconditionally; `Router` maintains the set (add on message receive, remove in `finally`) and feeds it to `startAttachmentGc` via `getActiveSessionDirs`. Long conversations no longer lose attachments mid-turn even with tight TTLs.
+- Empty-body guard fix (NR-1) — `headerLen` is now `NaN` when the `Content-Length` header is absent (was `0` because of `Number("")===0`). A chunked-encoded empty response is correctly rejected as `download` instead of being silently stored as a 0-byte file.
+
+**Should-fix (P1)**
+- DNS rebinding TOCTOU — `assertSafeUrl` now returns the resolved IP list and the per-hop validation in the redirect loop calls it again before each fetch. Trade-off: we still let `fetch` run its own DNS lookup (no IP pinning via custom `Agent`), so a sub-second-TTL rebind window remains theoretical. Documented; sufficient for the gateway's threat model.
+- Router unlinks `downloaded[]` when AI invocation throws — the cleanup that previously only ran on attachment-download failures now also fires when `aiAdapter.invoke` (or any send below it) throws, so failed turns don't leave files for the 24h GC.
+- Telegram `filePath` is now wrapped in `encodeURI()` before being interpolated into the file URL — preserves `/` separators between subdirectories but percent-encodes spaces, unicode, and other URL-unsafe characters. Defense-in-depth against any future `getFile` response oddity.
+- Content-Length truncation now reports `reason: "download_truncated"` (a new `AttachmentError` reason) for both the post-stream comparison path and the undici `terminated`/socket-close path. Callers can branch on it.
+
+**Test coverage**
+- 243 → 265 (+22 net): 6 BROKEN cases in `tests/qa-r2-attachments.test.ts` flipped to assert the fixed behaviour, 1 active-session-skip test added, and a new `tests/r3-fixes.test.ts` (16 cases) covers each R3 fix end-to-end with extra IP edge cases (172.16, 100.64 CGN as IPv4-mapped hex, public IPv6 control), redirect cap, GC live-state polling, encoded Telegram filePath, and the new `download_truncated` reason.
+- Build/test: `npm run build` ✅ · `npm test` ✅ (265/265).
+
+**Deferred (tracked, not blocking)**
+- Magic-byte (PE/ELF) sniffing — pinned `[DEFERRED]` in QA-R2 suite; gateway still trusts adapter+server MIME. Considered low risk because the AI agent doesn't execute files.
+- Discord 5xx single-hit retry — pinned `[DEFERRED]`; cosmetic robustness, separate retry helper task.
+
 ### R2 — Attachment hardening (Reviewer R1 + QA R1 follow-up)
 
 Response to `REVIEW-R1.md` (5 critical + 11 should-fix) and `QA-R1.md`
