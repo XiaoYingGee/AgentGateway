@@ -148,9 +148,26 @@ export function isPrivateIp(ip: string): boolean {
     if (Number.isFinite(hex) && (hex & 0xfe00) === 0xfc00) return true; // fc00::/7
     if (Number.isFinite(hex) && (hex & 0xff00) === 0xff00) return true; // ff00::/8 multicast
   }
-  // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) → recurse on the embedded v4
-  const v4 = lower.match(/^::ffff:([0-9.]+)$/);
-  if (v4) return isPrivateIp(v4[1]!);
+  // IPv4-mapped IPv6 (R3 P0): cover both forms WHATWG URL parser may produce.
+  //   - dotted form:  ::ffff:127.0.0.1
+  //   - hex tail form: ::ffff:7f00:1   (URL parser normalises the dotted form to this)
+  //   - fully-expanded: 0:0:0:0:0:ffff:127.0.0.1
+  // Decode either tail back to a v4 string and recurse so the v4 private/loopback
+  // table fires for IPv4-mapped IPv6 hostnames.
+  const dotted = lower.match(/^(?:0:){0,5}::?ffff:([0-9.]+)$/) || lower.match(/^::ffff:([0-9.]+)$/);
+  if (dotted) return isPrivateIp(dotted[1]!);
+  // Hex tail: ::ffff:HHHH:HHHH or 0:0:0:0:0:ffff:HHHH:HHHH
+  const hexMapped = lower.match(/^(?:0:){0,5}:?:ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/) ||
+                    lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (hexMapped) {
+    const hi = parseInt(hexMapped[1]!, 16);
+    const lo = parseInt(hexMapped[2]!, 16);
+    if (Number.isFinite(hi) && Number.isFinite(lo)) {
+      const v4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+      return isPrivateIp(v4);
+    }
+    return true; // malformed mapped form → treat as private (fail closed)
+  }
   return false;
 }
 

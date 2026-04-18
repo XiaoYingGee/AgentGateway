@@ -121,19 +121,12 @@ describe("QA-R2 P0-1 SSRF: IPv4-mapped IPv6 in URL hostnames", () => {
   ];
 
   for (const { url, comment } of bypasses) {
-    it(`[BROKEN] accepts ${url} — ${comment}`, async () => {
+    it(`rejects ${url} — ${comment}`, async () => {
       await withoutOverride(async () => {
-        let threw = false;
-        try { await assertSafeUrl(url); }
-        catch { threw = true; }
-        // NOTE: this asserts the *broken* behaviour. assertSafeUrl SHOULD reject
-        // every one of these. When it does, flip `assert.strictEqual(threw, false)`
-        // to `assert.strictEqual(threw, true)` (or use assert.rejects).
-        assert.strictEqual(
-          threw,
-          false,
-          `SSRF bypass FIXED — flip this assertion to expect a throw. URL: ${url}`,
-        );
+        // R3 P0-2: SSRF guard now classifies IPv4-mapped IPv6 hostnames in
+        // both dotted (`::ffff:127.0.0.1`) and hex-tail (`::ffff:7f00:1`) forms.
+        await assert.rejects(() => assertSafeUrl(url), AttachmentError,
+          `assertSafeUrl should reject ${url}`);
       });
     });
   }
@@ -143,13 +136,11 @@ describe("QA-R2 P0-1 SSRF: IPv4-mapped IPv6 in URL hostnames", () => {
     assert.strictEqual(isPrivateIp("::ffff:10.0.0.1"), true);
   });
 
-  it("[BROKEN] hex IPv4-mapped string is NOT classified as private", () => {
-    // Same address, just expressed in the hex tail form that URL normalisation produces.
-    // The current isPrivateIp returns false → guard fails open.
-    assert.strictEqual(isPrivateIp("::ffff:7f00:1"), false,
-      "Hex IPv4-mapped form now classified — flip this assertion.");
-    assert.strictEqual(isPrivateIp("::ffff:a9fe:a9fe"), false,
-      "Hex IPv4-mapped (cloud metadata) now classified — flip this assertion.");
+  it("hex IPv4-mapped string is now classified as private (R3 P0-2)", () => {
+    assert.strictEqual(isPrivateIp("::ffff:7f00:1"), true);
+    assert.strictEqual(isPrivateIp("::ffff:a9fe:a9fe"), true);
+    assert.strictEqual(isPrivateIp("::ffff:0a00:0001"), true);
+    assert.strictEqual(isPrivateIp("::ffff:c0a8:0001"), true);
   });
 });
 
