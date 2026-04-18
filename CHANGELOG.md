@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### R2 — Attachment hardening (Reviewer R1 + QA R1 follow-up)
+
+Response to `REVIEW-R1.md` (5 critical + 11 should-fix) and `QA-R1.md`
+(44 cases incl. 3 Reviewer-missed findings). Detailed map in `FIX-R2.md`.
+
+**Critical (P0)**
+- SSRF guard in `downloadAttachment`: protocol whitelist (http/https only) + DNS-resolved IP rejection covering loopback, private (10/8, 172.16/12, 192.168/16), link-local (169.254/16, fe80::/10), CGN (100.64/10), unique-local (fc00::/7), multicast, unspecified, and IPv4-mapped IPv6 variants. Override via `ATTACHMENT_ALLOW_PRIVATE_IPS=true` for dev/test only.
+- Telegram bot token isolation: `InboundAttachment.url` now uses `tg-file://<file_id>` placeholder; the token only enters memory inside `resolveTelegramFileUrl()` (reads `TELEGRAM_BOT_TOKEN` from env) and is scrubbed from all error paths via `redactToken()`.
+- Content-Length integrity check (QA-3.3): post-stream assertion that `written === Content-Length` when declared; mismatch unlinks the partial file and rejects with reason `download`.
+- Multi-attachment partial-failure cleanup: on any download error in a batch, all already-downloaded files are unlinked before the user receives `❌`.
+- Router attachment-failure now correctly returns `false`, so the reaction strip shows `❌` (matching the user-visible message) instead of `✅`.
+- Queue preserves per-message attachments (QA-7.2): `SessionManager` snapshots attachments on `enqueue` and the drain loop hands them to the synthetic message. Previously msgs 2..N's attachments were silently dropped.
+- Periodic disk GC for `.attachments/`: `startAttachmentGc` runs an initial sweep on `Router.start()` and re-sweeps every hour. Configurable via `ATTACHMENT_TTL_HOURS` (default 24, 0 = disabled). Removes empty per-session dirs.
+
+**Should-fix (Reviewer)**
+- Server `content-type` header re-validated against the MIME whitelist even when the adapter declared an allow-listed type (QA-5.2): adapter trust no longer launders disallowed payloads.
+- `sanitizeFilename` now: prefixes `_` to Windows reserved device names (CON/PRN/AUX/NUL/COM[1-9]/LPT[1-9]); strips trailing `.` and ` `; strips zero-width / RTL-override / BOM characters.
+- `hashSessionId()` (sha256 prefix) replaces `sanitizeFilename(sessionId)` when building per-session dirs (QA-6.3).
+- `${Date.now()}-${randomBytes(4)}-` prefix on stored filenames prevents same-millisecond collisions (QA-6.4).
+- AbortController + per-request timeout on every download (`ATTACHMENT_TIMEOUT_MS`, default 30s) and on Telegram `getFile` (5s).
+- Empty body without an explicit `Content-Length: 0` is now an error (was silently stored as 0-byte file).
+- `node:stream` `Transform` import hoisted to top-level static.
+
+**New env vars** (see `.env.example`)
+- `MAX_ATTACHMENT_SIZE` — documented (default 25 MB)
+- `ATTACHMENT_MIME_WHITELIST` — documented
+- `ATTACHMENT_TIMEOUT_MS` — new (default 30000)
+- `ATTACHMENT_TTL_HOURS` — new (default 24, 0 = disable GC)
+- `ATTACHMENT_ALLOW_PRIVATE_IPS` — new (default false; dev/test only)
+
+**Tests**
+- 139 → 208 (+69)
+- new `tests/ssrf.test.ts` (50), `tests/telegram-token.test.ts` (5), `tests/router-attachments.test.ts` (3), `tests/attachments-gc.test.ts` (10)
+- All KNOWN GAP cases in `tests/qa-attachments.test.ts` flipped to assert the fixed behaviour (no remaining `t.skip` / `TODO`).
+
 ### Multi-modal attachments
 
 - New: `IncomingMessage.attachments?: InboundAttachment[]` on `src/core/types.ts`
