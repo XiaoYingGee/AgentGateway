@@ -32,11 +32,17 @@ const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 
 export class AttachmentError extends Error {
-  constructor(message: string, public readonly reason: "size" | "mime" | "download" | "io") {
+  constructor(
+    message: string,
+    public readonly reason: "size" | "mime" | "download" | "io" | "redirect_loop",
+  ) {
     super(message);
     this.name = "AttachmentError";
   }
 }
+
+/** Maximum number of HTTP redirect hops we will follow when downloading. */
+const MAX_REDIRECT_HOPS = 3;
 
 export function getMaxAttachmentSize(): number {
   const v = process.env["MAX_ATTACHMENT_SIZE"];
@@ -242,8 +248,12 @@ function allowPrivateIps(): boolean {
  * SSRF guard against private/loopback/link-local addresses.
  * Throws AttachmentError(reason: "download") on rejection so caller surfaces
  * a uniform user-facing message.
+ *
+ * Returns the IP addresses the host resolved to (empty when host is an IP
+ * literal that's already public, or guard is disabled). Callers may use the
+ * resolved IP to mitigate DNS-rebinding TOCTOU.
  */
-export async function assertSafeUrl(rawUrl: string): Promise<void> {
+export async function assertSafeUrl(rawUrl: string): Promise<{ addresses: string[] }> {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -253,7 +263,7 @@ export async function assertSafeUrl(rawUrl: string): Promise<void> {
   if (!ALLOWED_PROTOCOLS.has(url.protocol)) {
     throw new AttachmentError(`Disallowed URL protocol: ${url.protocol}`, "download");
   }
-  if (allowPrivateIps()) return;
+  if (allowPrivateIps()) return { addresses: [] };
   const host = url.hostname.replace(/^\[|\]$/g, "");
   if (!host) {
     throw new AttachmentError(`Attachment URL has no host.`, "download");
@@ -263,7 +273,7 @@ export async function assertSafeUrl(rawUrl: string): Promise<void> {
     if (isPrivateIp(host)) {
       throw new AttachmentError(`Attachment URL resolves to a non-routable address.`, "download");
     }
-    return;
+    return { addresses: [host] };
   }
   // DNS lookup — reject if any resolved address is private.
   let addrs: { address: string }[];
@@ -283,6 +293,7 @@ export async function assertSafeUrl(rawUrl: string): Promise<void> {
       );
     }
   }
+  return { addresses: addrs.map((a) => a.address) };
 }
 
 interface DownloadOptions {
@@ -351,14 +362,63 @@ export async function downloadAttachment(
   const controller = new AbortController();
   const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
-    try {
-      res = await fetchImpl(effectiveUrl, { headers: att.headers, signal: controller.signal });
-    } catch (err) {
-      const msg = (err as Error).message ?? String(err);
-      throw new AttachmentError(
-        `Failed to download "${att.filename}": ${redactToken(msg)}`,
-        "download",
-      );
+    // R3 P0-1: SSRF-safe redirect handling.
+    // Use redirect: "manual" so we can re-validate every hop's Location header.
+    // We bound the chain at MAX_REDIRECT_HOPS to defeat redirect loops and
+    // "infinite redirect to internal" probes. The first hop was already
+    // validated above; per-hop assertSafeUrl runs again in-loop for follows.
+    let currentUrl = effectiveUrl;
+    let hop = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        res = await fetchImpl(currentUrl, {
+          headers: att.headers,
+          signal: controller.signal,
+          redirect: "manual",
+        });
+      } catch (err) {
+        const msg = (err as Error).message ?? String(err);
+        throw new AttachmentError(
+          `Failed to download "${att.filename}": ${redactToken(msg)}`,
+          "download",
+        );
+      }
+      // 3xx with a Location header → re-validate then re-fetch (manual follow).
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get("location");
+        if (!loc) {
+          throw new AttachmentError(
+            `Failed to download "${att.filename}": HTTP ${res.status} without Location header`,
+            "download",
+          );
+        }
+        if (++hop > MAX_REDIRECT_HOPS) {
+          throw new AttachmentError(
+            `Failed to download "${att.filename}": redirect chain exceeded ${MAX_REDIRECT_HOPS} hops`,
+            "redirect_loop",
+          );
+        }
+        // Resolve Location relative to the current URL (covers absolute and relative redirects).
+        let nextUrl: string;
+        try { nextUrl = new URL(loc, currentUrl).toString(); }
+        catch {
+          throw new AttachmentError(
+            `Failed to download "${att.filename}": invalid redirect Location "${loc}"`,
+            "download",
+          );
+        }
+        // R3 P1-5 (DNS rebinding TOCTOU): re-validate the redirect target every
+        // hop. We still let fetch run its own DNS lookup (no IP pinning via a
+        // custom dispatcher) — simpler implementation, accepted trade-off for
+        // the gateway's threat model. See FIX-R3.md for details.
+        if (!skipUrl) await assertSafeUrl(nextUrl);
+        // Drain the 3xx body so the connection can be reused.
+        try { await res.body?.cancel(); } catch { /* ignore */ }
+        currentUrl = nextUrl;
+        continue;
+      }
+      break;
     }
     if (!res.ok) {
       throw new AttachmentError(

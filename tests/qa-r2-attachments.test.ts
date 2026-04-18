@@ -161,7 +161,7 @@ describe("QA-R2 P0-1 SSRF: redirect-to-internal", () => {
   // to internal. The override applies to assertSafeUrl, but fetch still
   // follows the cross-origin redirect with no per-hop validation.
 
-  it("[BROKEN] fetch auto-follows 302 to a loopback host without re-validating", async () => {
+  it("fetch is forced to redirect:'manual' and re-validates each hop (R3 P0-1)", async () => {
     let internalReached = false;
     const internal = await startStaticServer((_req, res) => {
       internalReached = true;
@@ -174,25 +174,19 @@ describe("QA-R2 P0-1 SSRF: redirect-to-internal", () => {
     });
     const baseDir = mkTmp();
     try {
-      // SIMULATE a public-resolving hostname for the initial URL by enabling
-      // the override (which is exactly what the SSRF guard does for the
-      // first-hop URL when it resolves to something public).
+      // We turn the override OFF so the redirect target's loopback IP is rejected.
       const old = process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"];
-      process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"] = "true";
+      delete process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"];
       try {
-        const out = await downloadAttachment(
-          { url: redir.url("/start"), filename: "x.png", mimeType: "image/png" },
-          { baseDir, sessionId: "s" },
+        await assert.rejects(
+          () => downloadAttachment(
+            { url: redir.url("/start"), filename: "x.png", mimeType: "image/png" },
+            { baseDir, sessionId: "s", enforceUrlValidation: true },
+          ),
+          AttachmentError,
         );
-        // The download succeeded and the internal server was reached — proof
-        // that fetch auto-followed the redirect without re-running the SSRF
-        // guard. When fixed (`redirect: "manual"` + per-hop assertSafeUrl),
-        // this should throw AttachmentError("download") and internalReached
-        // should remain false.
-        assert.strictEqual(internalReached, true,
-          "internal server should have been reached (current broken behaviour)");
-        assert.strictEqual(out.size, 5,
-          "5-byte payload smuggled from internal server (current broken behaviour)");
+        assert.strictEqual(internalReached, false,
+          "internal server must not be reached — redirect was rejected pre-fetch");
       } finally {
         if (old == null) delete process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"];
         else process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"] = old;
