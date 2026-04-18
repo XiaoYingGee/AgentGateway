@@ -341,7 +341,7 @@ describe("QA-R2 P0-3 Content-Length: declared > actual rejected", () => {
             { url: url("/x.png"), filename: "x.png", mimeType: "image/png" },
             { baseDir, sessionId: "s", enforceUrlValidation: false },
           ),
-          (e: any) => e instanceof AttachmentError && (e.reason === "download" || e.reason === "io"),
+          (e: any) => e instanceof AttachmentError && (e.reason === "download" || e.reason === "download_truncated" || e.reason === "io"),
         );
         // No leftover file should remain
         const root = path.join(baseDir, ".attachments");

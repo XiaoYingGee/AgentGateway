@@ -34,7 +34,7 @@ const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 export class AttachmentError extends Error {
   constructor(
     message: string,
-    public readonly reason: "size" | "mime" | "download" | "io" | "redirect_loop",
+    public readonly reason: "size" | "mime" | "download" | "io" | "redirect_loop" | "download_truncated",
   ) {
     super(message);
     this.name = "AttachmentError";
@@ -497,8 +497,22 @@ export async function downloadAttachment(
       // Cleanup partial file on any pipeline error
       await unlink(target).catch(() => {});
       if (err instanceof AttachmentError) throw err;
+      // R3 #8: undici raises `terminated` (or socket reset) when the server
+      // lies about Content-Length. Surface this as `download_truncated` so
+      // callers can distinguish it from a generic write-side I/O failure.
+      const errMsg = (err as Error).message ?? String(err);
+      const code = (err as any)?.code ?? (err as any)?.cause?.code;
+      const looksTruncated =
+        code === "UND_ERR_SOCKET" ||
+        /terminated|premature close|aborted|stream reset/i.test(errMsg);
+      if (Number.isFinite(headerLen) && headerLen > 0 && looksTruncated) {
+        throw new AttachmentError(
+          `Attachment "${att.filename}" size mismatch: declared ${headerLen}B, transport terminated early.`,
+          "download_truncated",
+        );
+      }
       throw new AttachmentError(
-        `Failed to write "${att.filename}": ${(err as Error).message}`,
+        `Failed to write "${att.filename}": ${errMsg}`,
         "io",
       );
     }
@@ -506,11 +520,13 @@ export async function downloadAttachment(
     // Content-Length integrity check (QA-3.3): if server declared a length, the
     // streamed body must match exactly. Otherwise an attacker (or a buggy upstream)
     // can silently truncate a file that we then hand to the AI.
+    // R3 #8: standardise on `download_truncated` for declared-vs-actual size
+    // mismatches so callers can branch on it.
     if (Number.isFinite(headerLen) && headerLen > 0 && written !== headerLen) {
       await unlink(target).catch(() => {});
       throw new AttachmentError(
         `Attachment "${att.filename}" size mismatch: declared ${headerLen}B, received ${written}B.`,
-        "download",
+        "download_truncated",
       );
     }
 
