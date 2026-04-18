@@ -7,7 +7,7 @@ import {
   type TextChannel,
   type ThreadChannel,
 } from "discord.js";
-import type { IMAdapter, InboundMessage, SendResult } from "../../core/types.js";
+import type { IMAdapter, InboundAttachment, InboundMessage, SendResult } from "../../core/types.js";
 
 const MAX_BOT_CHAIN = 3;
 
@@ -176,7 +176,7 @@ export class DiscordAdapter implements IMAdapter {
     }
 
     const text = message.content.replace(/<@!?\d+>/g, "").trim();
-    if (!text) return;
+    if (!text && message.attachments.size === 0) return;
 
     const channel = message.channel as TextChannel | ThreadChannel;
 
@@ -213,6 +213,16 @@ export class DiscordAdapter implements IMAdapter {
       sessionKey = `discord:guild:${guildId}:channel:${chatId}:user:${message.author.id}`;
     }
 
+    const attachments: InboundAttachment[] = [];
+    for (const a of message.attachments.values()) {
+      attachments.push({
+        url: a.url,
+        filename: a.name ?? `discord-${a.id}`,
+        mimeType: a.contentType ?? undefined,
+        size: typeof a.size === "number" ? a.size : undefined,
+      });
+    }
+
     const inbound: InboundMessage = {
       platform: "discord",
       sessionKey,
@@ -223,6 +233,7 @@ export class DiscordAdapter implements IMAdapter {
       text,
       threadId: isThread ? channel.id : undefined,
       replyToId: message.id,
+      attachments: attachments.length > 0 ? attachments : undefined,
       raw: message,
     };
 

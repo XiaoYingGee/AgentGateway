@@ -1,5 +1,5 @@
 import { Bot, type Context } from "grammy";
-import type { IMAdapter, InboundMessage, SendResult } from "../../core/types.js";
+import type { IMAdapter, InboundAttachment, InboundMessage, SendResult } from "../../core/types.js";
 import { BaseIMAdapter } from "./base.js";
 import { splitMessage } from "../../utils/messages.js";
 
@@ -38,11 +38,16 @@ export class TelegramAdapter extends BaseIMAdapter implements IMAdapter {
   }
 
   async connect(): Promise<void> {
-    this.bot.on("message:text", (ctx) => {
+    const handle = (ctx: Context) => {
       this.onTelegramMessage(ctx).catch((err) => {
         console.error(`[telegram] Unhandled error in onTelegramMessage:`, err);
       });
-    });
+    };
+    // Text + attachment-bearing message kinds
+    this.bot.on("message:text", handle);
+    this.bot.on("message:photo", handle);
+    this.bot.on("message:document", handle);
+    this.bot.on("message:voice", handle);
 
     // R3: validate token before starting long-poll
     await this.bot.init();
@@ -118,7 +123,7 @@ export class TelegramAdapter extends BaseIMAdapter implements IMAdapter {
     if (!this.handler) return;
 
     const msg = ctx.message;
-    if (!msg || !msg.text) return;
+    if (!msg) return;
 
     // Ignore messages from bots
     if (msg.from?.is_bot) return;
@@ -129,8 +134,51 @@ export class TelegramAdapter extends BaseIMAdapter implements IMAdapter {
     if (this.allowedUsers.length === 0) return;
     if (!this.allowedUsers.includes(userId)) return;
 
-    const text = msg.text.trim();
-    if (!text) return;
+    const text = (msg.text ?? msg.caption ?? "").trim();
+
+    // Collect attachments (photo / document / voice)
+    const attachments: InboundAttachment[] = [];
+    try {
+      if (msg.photo && msg.photo.length > 0) {
+        // Largest photo size is the last entry
+        const largest = msg.photo[msg.photo.length - 1]!;
+        const url = await this.buildFileUrl(largest.file_id);
+        if (url) {
+          attachments.push({
+            url,
+            filename: `photo-${largest.file_unique_id}.jpg`,
+            mimeType: "image/jpeg",
+            size: typeof largest.file_size === "number" ? largest.file_size : undefined,
+          });
+        }
+      }
+      if (msg.document) {
+        const url = await this.buildFileUrl(msg.document.file_id);
+        if (url) {
+          attachments.push({
+            url,
+            filename: msg.document.file_name ?? `document-${msg.document.file_unique_id}`,
+            mimeType: msg.document.mime_type ?? undefined,
+            size: typeof msg.document.file_size === "number" ? msg.document.file_size : undefined,
+          });
+        }
+      }
+      if (msg.voice) {
+        const url = await this.buildFileUrl(msg.voice.file_id);
+        if (url) {
+          attachments.push({
+            url,
+            filename: `voice-${msg.voice.file_unique_id}.ogg`,
+            mimeType: msg.voice.mime_type ?? "audio/ogg",
+            size: typeof msg.voice.file_size === "number" ? msg.voice.file_size : undefined,
+          });
+        }
+      }
+    } catch (err) {
+      console.warn(`[telegram] Failed to resolve file URL:`, err);
+    }
+
+    if (!text && attachments.length === 0) return;
 
     const chatId = String(msg.chat.id);
     const chatType = msg.chat.type; // "private" | "group" | "supergroup" | "channel"
@@ -168,10 +216,25 @@ export class TelegramAdapter extends BaseIMAdapter implements IMAdapter {
       text: cleanText,
       threadId,
       replyToId: String(msg.message_id),
+      attachments: attachments.length > 0 ? attachments : undefined,
       raw: msg,
     };
 
     await this.handler(inbound);
+  }
+
+  /** Resolve a Telegram file_id to an HTTPS download URL via getFile. */
+  private async buildFileUrl(fileId: string): Promise<string | undefined> {
+    try {
+      const file = await this.bot.api.getFile(fileId);
+      if (!file.file_path) return undefined;
+      // grammy exposes the bot token via bot.token
+      const token = (this.bot as unknown as { token: string }).token;
+      return `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+    } catch (err) {
+      console.warn(`[telegram] getFile failed for ${fileId}:`, err);
+      return undefined;
+    }
   }
 }
 
