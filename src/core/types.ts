@@ -1,3 +1,13 @@
+/** Inbound attachment descriptor — same shape as utils/attachments Attachment. */
+export interface InboundAttachment {
+  url: string;
+  filename: string;
+  mimeType?: string;
+  size?: number;
+  /** Headers to include when downloading (e.g. Slack Bearer token). */
+  headers?: Record<string, string>;
+}
+
 /** Unified inbound message from any IM platform */
 export interface InboundMessage {
   platform: string;
@@ -9,6 +19,8 @@ export interface InboundMessage {
   text: string;
   threadId?: string;
   replyToId?: string;
+  /** Optional attachments parsed by IM adapter; router downloads + appends to prompt. */
+  attachments?: InboundAttachment[];
   raw: unknown;
 }
 
