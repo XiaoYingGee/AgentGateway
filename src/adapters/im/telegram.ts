@@ -136,46 +136,38 @@ export class TelegramAdapter extends BaseIMAdapter implements IMAdapter {
 
     const text = (msg.text ?? msg.caption ?? "").trim();
 
-    // Collect attachments (photo / document / voice)
+    // Collect attachments (photo / document / voice).
+    // We DO NOT call getFile here so the bot token never enters the URL.
+    // The downloader resolves tg-file://<file_id> at fetch time.
     const attachments: InboundAttachment[] = [];
     try {
       if (msg.photo && msg.photo.length > 0) {
-        // Largest photo size is the last entry
         const largest = msg.photo[msg.photo.length - 1]!;
-        const url = await this.buildFileUrl(largest.file_id);
-        if (url) {
-          attachments.push({
-            url,
-            filename: `photo-${largest.file_unique_id}.jpg`,
-            mimeType: "image/jpeg",
-            size: typeof largest.file_size === "number" ? largest.file_size : undefined,
-          });
-        }
+        attachments.push({
+          url: this.buildFileUrl(largest.file_id),
+          filename: `photo-${largest.file_unique_id}.jpg`,
+          mimeType: "image/jpeg",
+          size: typeof largest.file_size === "number" ? largest.file_size : undefined,
+        });
       }
       if (msg.document) {
-        const url = await this.buildFileUrl(msg.document.file_id);
-        if (url) {
-          attachments.push({
-            url,
-            filename: msg.document.file_name ?? `document-${msg.document.file_unique_id}`,
-            mimeType: msg.document.mime_type ?? undefined,
-            size: typeof msg.document.file_size === "number" ? msg.document.file_size : undefined,
-          });
-        }
+        attachments.push({
+          url: this.buildFileUrl(msg.document.file_id),
+          filename: msg.document.file_name ?? `document-${msg.document.file_unique_id}`,
+          mimeType: msg.document.mime_type ?? undefined,
+          size: typeof msg.document.file_size === "number" ? msg.document.file_size : undefined,
+        });
       }
       if (msg.voice) {
-        const url = await this.buildFileUrl(msg.voice.file_id);
-        if (url) {
-          attachments.push({
-            url,
-            filename: `voice-${msg.voice.file_unique_id}.ogg`,
-            mimeType: msg.voice.mime_type ?? "audio/ogg",
-            size: typeof msg.voice.file_size === "number" ? msg.voice.file_size : undefined,
-          });
-        }
+        attachments.push({
+          url: this.buildFileUrl(msg.voice.file_id),
+          filename: `voice-${msg.voice.file_unique_id}.ogg`,
+          mimeType: msg.voice.mime_type ?? "audio/ogg",
+          size: typeof msg.voice.file_size === "number" ? msg.voice.file_size : undefined,
+        });
       }
     } catch (err) {
-      console.warn(`[telegram] Failed to resolve file URL:`, err);
+      console.warn(`[telegram] Failed to build attachment descriptor:`, err);
     }
 
     if (!text && attachments.length === 0) return;
@@ -223,18 +215,12 @@ export class TelegramAdapter extends BaseIMAdapter implements IMAdapter {
     await this.handler(inbound);
   }
 
-  /** Resolve a Telegram file_id to an HTTPS download URL via getFile. */
-  private async buildFileUrl(fileId: string): Promise<string | undefined> {
-    try {
-      const file = await this.bot.api.getFile(fileId);
-      if (!file.file_path) return undefined;
-      // grammy exposes the bot token via bot.token
-      const token = (this.bot as unknown as { token: string }).token;
-      return `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-    } catch (err) {
-      console.warn(`[telegram] getFile failed for ${fileId}:`, err);
-      return undefined;
-    }
+  /** Resolve a Telegram file_id to a private placeholder URL.
+   *  The bot token is NOT embedded in the URL; downloadAttachment resolves it
+   *  internally via TELEGRAM_BOT_TOKEN env at fetch time so token never lands
+   *  in InboundAttachment.url, prompts, or error logs. */
+  private buildFileUrl(fileId: string): string {
+    return `tg-file://${fileId}`;
   }
 }
 

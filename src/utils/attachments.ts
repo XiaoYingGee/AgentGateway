@@ -161,6 +161,57 @@ export function redactToken(s: string): string {
                   .replace(/(token=)[^&\s]+/gi, "$1<redacted>");
 }
 
+/**
+ * Resolve a Telegram tg-file://<file_id> placeholder to a real download URL.
+ * The bot token is taken from TELEGRAM_BOT_TOKEN env so it never appears in
+ * InboundAttachment.url, prompts, or error messages bubbled to the user.
+ * Throws AttachmentError("download") on any failure (errors are token-redacted).
+ */
+export async function resolveTelegramFileUrl(
+  url: string,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = 5000,
+): Promise<string> {
+  const m = /^tg-file:\/\/(.+)$/i.exec(url);
+  if (!m) return url;
+  const fileId = m[1]!;
+  const token = process.env["TELEGRAM_BOT_TOKEN"];
+  if (!token) {
+    throw new AttachmentError(
+      `Telegram attachment requires TELEGRAM_BOT_TOKEN to download.`,
+      "download",
+    );
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const apiUrl = `https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`;
+    let res: Response;
+    try {
+      res = await fetchImpl(apiUrl, { signal: ctrl.signal });
+    } catch (err) {
+      throw new AttachmentError(
+        `Telegram getFile failed: ${redactToken((err as Error).message)}`,
+        "download",
+      );
+    }
+    if (!res.ok) {
+      throw new AttachmentError(`Telegram getFile failed: HTTP ${res.status}`, "download");
+    }
+    let body: any;
+    try { body = await res.json(); } catch {
+      throw new AttachmentError(`Telegram getFile returned non-JSON.`, "download");
+    }
+    const filePath = body?.result?.file_path;
+    if (!filePath || typeof filePath !== "string") {
+      throw new AttachmentError(`Telegram getFile missing file_path.`, "download");
+    }
+    return `https://api.telegram.org/file/bot${token}/${filePath}`;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function allowPrivateIps(): boolean {
   return process.env["ATTACHMENT_ALLOW_PRIVATE_IPS"] === "true";
 }
@@ -263,8 +314,16 @@ export async function downloadAttachment(
   const skipUrl = opts.enforceUrlValidation
     ? false
     : (opts.skipUrlValidation ?? !!opts.fetchImpl);
+
+  // Telegram tg-file:// resolver: convert placeholder to real URL via getFile,
+  // keeping the bot token out of att.url and any user-visible error path.
+  let effectiveUrl = att.url;
+  if (effectiveUrl.startsWith("tg-file://")) {
+    effectiveUrl = await resolveTelegramFileUrl(effectiveUrl, fetchImpl);
+  }
+
   if (!skipUrl) {
-    await assertSafeUrl(att.url);
+    await assertSafeUrl(effectiveUrl);
   }
 
   let res: Response;
@@ -272,7 +331,7 @@ export async function downloadAttachment(
   const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
     try {
-      res = await fetchImpl(att.url, { headers: att.headers, signal: controller.signal });
+      res = await fetchImpl(effectiveUrl, { headers: att.headers, signal: controller.signal });
     } catch (err) {
       const msg = (err as Error).message ?? String(err);
       throw new AttachmentError(
